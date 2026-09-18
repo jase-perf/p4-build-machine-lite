@@ -1,0 +1,6 @@
+# Python bytecode
+__pycache__/
+
+# Made by build_machine.py when it runs here
+workspace/
+builds/
