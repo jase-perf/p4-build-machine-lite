@@ -20,7 +20,7 @@ Polling alone is enough. A trigger makes builds start instantly instead of withi
 1. **Put a build script in your project** and submit it. Copy one from `examples/`: [Godot](examples/godot), [Unity](examples/unity), or [Unreal](examples/unreal). It goes next to your project file (`project.godot`, `Assets/`, or `*.uproject`). Take that folder's `.p4ignore` too, if your project doesn't have one yet.
 2. **Copy `build_machine.py`** to the computer that will do the builds, into a folder of its own.
 3. **Edit the settings** at the top of `build_machine.py`. At minimum set `NAME` and `STREAM`.
-4. **Check P4 works** in a terminal on that computer: `p4 info`, then `p4 login` if it asks for a password. The build machine uses your normal P4 connection and your P4 user. It creates a workspace of its own (one of the free tier's 20) and doesn't need its own user.
+4. **Check P4 works** in a terminal on that computer: `p4 info`, then `p4 login` if it asks for a password. If your server address starts with `ssl:`, run `p4 trust` first, once. The build machine uses your normal P4 connection and your P4 user. It creates a workspace of its own (one of the free tier's 20) and doesn't need its own user.
 5. **Run it:** `py build_machine.py` on Windows (plain `python` there can be a Microsoft Store shortcut), or `python3 build_machine.py` on macOS and Linux. Allow it through the firewall if asked.
 6. **Open** `http://<that-computer>:8080`. The first build starts within a minute.
 

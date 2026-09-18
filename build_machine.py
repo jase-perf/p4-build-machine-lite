@@ -85,8 +85,19 @@ def p4(*args, stdin=None):
     result = subprocess.run(["p4", "-c", WORKSPACE, "-v", "net.maxwait=60", *args], input=stdin,
                             capture_output=True, encoding="utf-8", errors="replace", cwd=HERE)
     if result.returncode != 0:
-        raise RuntimeError(f"P4 said: {(result.stderr or result.stdout).strip()}")
+        raise RuntimeError(f"P4 said: {error_text(result.stderr or result.stdout)}")
     return result.stdout
+
+
+def error_text(output):
+    """P4's error message in plain words. With -Mj, errors come as JSON too: {"data": "..."}."""
+    words = []
+    for line in output.strip().splitlines():
+        try:
+            words.append(json.loads(line)["data"].strip())
+        except (ValueError, KeyError, TypeError):
+            words.append(line.strip())
+    return " ".join(words)
 
 
 def p4_json(*args):
@@ -491,8 +502,8 @@ def status_page():
         banner = (f'<div class="banner {latest["result"]}">{label}: change {e(latest["change"])} '
                   f'by {e(latest["user"])}<span>{e(latest["desc"])}</span></div>')
     if problem:
-        banner += (f'<div class="banner failed">Problem: {e(problem)}<span>If it mentions a '
-                   'ticket or password, run p4 login on the build computer.</span></div>')
+        banner += (f'<div class="banner failed">Problem: {e(problem)}<span>If P4 asks you to '
+                   'log in, run p4 login on the build machine.</span></div>')
     if good:
         banner += f'<p><a href="/latest">Download the newest good build (change {e(good["change"])})</a></p>'
 
