@@ -9,13 +9,13 @@ teammate would do by hand:
     1. get the newest submitted change, or a shelved change under review
     2. run the build script that lives in your project (build.bat or build.sh)
     3. keep the result: a zip to download, the log, and a pass/fail status
-       page at http://<this-computer>:8080
+       page at http://<this-computer>:8765
 
 Ways to start a build (add token=<TOKEN> to each one if you set TOKEN):
     Polling:         every POLL_SECONDS it asks P4 whether anything new was submitted.
-    P4 trigger:      buildmachine change-commit //project/main/... "curl -s -m 5 -X POST http://HOST:8080/build?reason=p4-trigger"
-    P4 Code Review:  a test with URL http://HOST:8080/build and body change={change}&status={status}&update={update}
-    By hand:         the Build now button on the status page, or curl -X POST http://HOST:8080/build
+    P4 trigger:      buildmachine change-commit //project/main/... "curl -s -m 5 -X POST http://HOST:8765/build?reason=p4-trigger"
+    P4 Code Review:  a test with URL http://HOST:8765/build and body change={change}&status={status}&update={update}
+    By hand:         the Build now button on the status page, or curl -X POST http://HOST:8765/build
 
 Your build script runs in its own folder with three environment variables:
     BUILD_OUTPUT   an empty folder: put the playable game here and it becomes the zip
@@ -55,7 +55,7 @@ NAME = "MyGame"                    # shown on the status page and used in zip na
 STREAM = "//project/main"          # the stream to build
 WORKSPACE = "build-machine"        # the build machine's own workspace, created if missing
 BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"  # its path inside the stream
-PORT = 8080
+PORT = 8765
 POLL_SECONDS = 60                  # ask P4 for new changes this often (0 = never)
 TOKEN = ""                         # if set, starting a build needs token=<TOKEN>
 CODE_REVIEW_URL = ""               # your P4 Code Review address, e.g. "http://review.local"
@@ -549,12 +549,17 @@ def main():
     except RuntimeError as error:
         raise SystemExit(f"Can't start: {error}\nCheck that `p4 info` works in this terminal "
                          "(run `p4 login` if it asks for a password).")
+    try:
+        server = ThreadingHTTPServer(("", PORT), Handler)
+    except OSError as error:
+        raise SystemExit(f"Can't use port {PORT}, probably because another program already is "
+                         f"({error}). Choose another PORT in the settings.")
     threading.Thread(target=build_forever, daemon=True).start()
     if POLL_SECONDS:
         threading.Thread(target=poll_forever, daemon=True).start()
     print(f"{NAME} build machine on {PUBLIC_URL} building {STREAM} (Ctrl+C to stop)")
     try:
-        ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+        server.serve_forever()
     except KeyboardInterrupt:
         print("Stopped.")
 
