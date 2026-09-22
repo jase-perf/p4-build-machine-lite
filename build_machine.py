@@ -329,7 +329,15 @@ def get_the_code(change, shelved, from_scratch=False):
     # -I means read no .p4ignore, so those caches and the last build's leftovers go too.
     p4("clean", *(["-I"] if from_scratch else []), everything)
     if shelved:
-        p4("unshelve", "-s", change)   # opens the shelf's files at the revisions it started from
+        # Open the shelf's files at the revisions it started from. --bypass-exclusive-lock
+        # (undocumented) opens locked (+l) files too, even while the author or another build
+        # machine has them open.
+        p4("unshelve", "--bypass-exclusive-lock", "-s", change)
+        opened = p4_json("opened", everything)
+        in_shelf = p4_json("files", f"@={change}")
+        if len(opened) < len(in_shelf):
+            raise RuntimeError(f"only {len(opened)} of the {len(in_shelf)} files in shelf {change} "
+                               f"could be unshelved into {STREAM}")
         # Merge in whatever teammates submitted to those files since, as P4 would at submit.
         # Skip this and a shelf silently undoes their newer work in the build.
         p4("sync", "-q", everything)
@@ -338,37 +346,6 @@ def get_the_code(change, shelved, from_scratch=False):
         if conflicts:
             raise RuntimeError(f"shelf {change} conflicts with newer changes in {len(conflicts)} "
                                "file(s). Resolve and shelve again.")
-        copy_locked_files(change, {f["depotFile"] for f in p4_json("opened", everything)})
-
-
-def copy_locked_files(change, opened):
-    """Copy in the shelved files that couldn't be unshelved because they're locked (+l).
-    A locked file can't be opened here while it's open anywhere else: by the author, who may
-    have kept it checked out after shelving, or by another build machine testing this shelf.
-    If nobody has submitted it since the shelf was made there's nothing to merge, so the
-    shelf's copy is exactly what submitting would give. Anything else is an error."""
-    for shelf_file in p4_json("files", f"@={change}"):
-        depot = shelf_file["depotFile"]
-        if depot in opened:
-            continue
-        # The last mapping is the one that applies; an excluded path has only "unmap" ones.
-        mapped = [w for w in p4_json("where", depot)
-                  if "unmap" not in w and not w["depotFile"].startswith("-")]
-        if not mapped:
-            raise RuntimeError(f"shelf {change} has files outside {STREAM}, like {depot}")
-        if "l" not in shelf_file["type"].partition("+")[2]:
-            raise RuntimeError(f"{depot} in shelf {change} couldn't be unshelved into {STREAM}")
-        if shelf_file["action"] in ("edit", "integrate"):
-            head = p4_json("files", depot)
-            if not head or head[0]["rev"] != shelf_file["rev"]:
-                raise RuntimeError(f"{depot} is locked and was changed after shelf {change} was "
-                                   "made. Unshelve it, resolve, and shelve again.")
-        path = Path(mapped[-1]["path"])
-        if "delete" in shelf_file["action"]:
-            path.unlink(missing_ok=True)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            p4("print", "-q", "-o", str(path), f"{depot}@={change}")
 
 
 # ---------------------------------------------------------------------------

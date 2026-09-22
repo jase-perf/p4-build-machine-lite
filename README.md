@@ -71,7 +71,7 @@ Submitters then see `Build queued` after `Change N submitted`. If the build mach
 2. Make sure a Code Review project has a branch covering your stream, like `//MyGame/main/...`. Without one, stream shelves don't become reviews.
 3. Add a test to a workflow, with URL `http://BUILD-PC:8765/build` and this body, URL encoded: `change={change}&status={status}&update={update}&token=TOKEN`
 
-Each review is built with the newest code merged in, and shows pass or fail with a link to the log. Locked (`+l`) files are copied in as shelved, so reviews build even while their author keeps them checked out. "There was no response" means Code Review couldn't reach `BUILD-PC`.
+Each review is built with the newest code merged in, and shows pass or fail with a link to the log. Locked (`+l`) files unshelve too, even while their author has them checked out (tested with P4 2026.1). If your server refuses, the author must revert them after shelving. "There was no response" means Code Review couldn't reach `BUILD-PC`.
 
 ### Build on Windows and a Mac
 
