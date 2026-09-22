@@ -1,44 +1,17 @@
 #!/usr/bin/env python3
 """
-p4-build-machine-lite: turns one computer into a build machine for a Perforce (P4)
-project, for small teams and solo projects that don't need a full CI system.
+P4 Build Machine Lite: a build machine for a Perforce (P4) project, in one file.
 
-It keeps its own P4 workspace. Whenever a build is requested, it does what a
-teammate would do by hand:
+When someone submits, it syncs its own P4 workspace, runs the build script in your
+project (build.bat or build.sh), and puts the result on a web page: pass or fail,
+the log, and the game to download. Settings live in build-machine.ini next to this
+file; the first run creates it. See README.md.
 
-    1. get the newest submitted change, or a shelved change under review
-    2. run the build script that lives in your project (build.bat or build.sh)
-    3. keep the result: a zip to download, the log, and a pass/fail status
-       page at http://<this-computer>:8765
-
-There are two kinds of build:
-    test build     the everyday one. It keeps the engine's cache, so it's quick, and
-                   your script builds the game with its debug or development settings.
-    release build  asked for by hand. It deletes everything the last build left behind
-                   and starts over, and your script builds the game the way players get it.
-
-Ways to start a build. Every one but polling needs the token, which the build
-machine makes on its first run and prints, along with a team link, when it starts:
-    Polling:         every POLL_SECONDS it asks P4 whether anything new was submitted.
-    P4 trigger:      buildmachine change-commit //project/main/... "curl -s -m 5 -d reason=p4-trigger -d token=TOKEN http://HOST:8765/build"
-    P4 Code Review:  a test with URL http://HOST:8765/build and body change={change}&status={status}&update={update}&token=TOKEN
-    By hand:         the Build now and Release build buttons on the status page, after
-                     opening the team link once in that browser
-
-Your build script runs in its own folder with four environment variables:
-    BUILD_OUTPUT   an empty folder: put the playable game here and it becomes the zip
-    BUILD_CHANGE   the changelist being built
-    BUILD_NUMBER   this build's number
-    BUILD_KIND     "test" or "release"
-Exit with 0 and the build passes. Anything else and it fails.
-
-Anyone who can reach this computer's port can read the page, the logs and the
-zips, so run it on a network you trust. Only the token lets anyone start a build.
-
-Needs Python 3.9+ and the p4 command line, and nothing else.
     Windows:        py build_machine.py
     macOS / Linux:  python3 build_machine.py
 """
+import configparser
+import ctypes
 import hmac
 import html
 import json
@@ -52,37 +25,82 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Settings. P4PORT and P4USER come from your normal P4 setup (p4 set, or a
-# .p4config file next to this script), the same connection you use yourself.
+# Settings come from build-machine.ini (see load_settings). The first run writes
+# this template for you to fill in.
 # ---------------------------------------------------------------------------
-NAME = "MyGame"                    # shown on the status page and used in zip names
-STREAM = "//project/main"          # the stream to build
-WORKSPACE = "build-machine"        # the build machine's own workspace, created if missing
-# Your build script's path inside the stream. If your project is in a folder, include it:
-# "Game/build.bat" for a game in //project/main/Game. The script runs in its own folder.
-BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"
-PORT = 8765
-POLL_SECONDS = 60                  # ask P4 for new changes this often (0 = never)
-TOKEN = ""                         # the password for starting builds: 8+ letters, digits, - or _.
-                                   # Leave it empty and one is made for you, kept in token.txt
-CODE_REVIEW_URL = ""               # your P4 Code Review address, e.g. "http://review.local"
-WEBHOOK_URL = ""                   # optional Discord webhook for pass/fail messages
-PUBLIC_URL = f"http://{socket.gethostname()}:{PORT}"  # how teammates reach this page
-KEEP_BUILDS = 20                   # older builds are deleted, except the newest good one of each kind
-BUILD_TIMEOUT = 30 * 60            # seconds before a stuck build is stopped
-MAX_WAITING = 10                   # build requests that can wait at once
+SETTINGS_TEMPLATE = """\
+# P4 Build Machine Lite settings. Lines starting with # are notes.
+# Restart the build machine after changing them.
 
-HERE = Path(__file__).resolve().parent
+# The stream to build, like //MyGame/main
+stream =
+
+# The folder in that stream holding build.bat (Windows) or build.sh (macOS, Linux),
+# like Game. Leave it empty if they're at the top of the stream.
+project_folder =
+
+# Optional settings. To use one, delete its # and change the value.
+
+# Your P4 server and user, if the p4 command doesn't already use them.
+# server = ssl:perforce.example.com:1666
+# user = me
+
+# Shown on the page and in zip names. Your stream's depot name if not set.
+# name = My Game
+
+# The page's port, and how teammates reach it if not http://<this computer>:<port>
+# port = 8765
+# public_url =
+
+# Seconds between checks for new submits. 0 turns checking off.
+# poll_seconds = 60
+
+# The password for starting builds. Made for you in token.txt if not set.
+# token =
+
+# P4 Code Review's address, to test every review (see the README).
+# code_review_url =
+
+# A Discord channel webhook, to post each pass or fail.
+# discord_webhook =
+
+# The build machine's own P4 workspace, how many builds to keep,
+# and how long a build may take.
+# workspace = build-machine
+# keep_builds = 20
+# build_timeout_minutes = 30
+"""
+STREAM = ""
+PROJECT_FOLDER = ""
+SERVER = ""
+USER = ""
+NAME = ""
+PORT = 8765
+PUBLIC_URL = ""
+POLL_SECONDS = 60
+TOKEN = ""
+CODE_REVIEW_URL = ""
+WEBHOOK_URL = ""
+WORKSPACE = "build-machine"
+KEEP_BUILDS = 20
+BUILD_TIMEOUT = 30 * 60            # seconds
+MAX_WAITING = 10                   # build requests that can wait at once
+BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"
+COOKIE = "build_machine_8765"      # named by port, so two build machines on one PC don't clash
+
+# A PyInstaller .exe runs from a temporary folder, so its own files go next to the .exe.
+HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+SETTINGS_FILE = HERE / "build-machine.ini"
 WORKSPACE_DIR = HERE / "workspace"
 BUILDS_DIR = HERE / "builds"
 TOKEN_FILE = HERE / "token.txt"
-COOKIE = f"build_machine_{PORT}"   # named by port, so two build machines on one PC don't clash
 
 token = ""                         # TOKEN, or the one in token.txt (see load_token)
 history = []                       # every build started, oldest first (saved in builds/history.json)
@@ -92,17 +110,134 @@ problem = ""                       # the last error, shown on the status page
 new_request = threading.Condition()
 
 
+def window_closes_on_exit():
+    """Whether this window closes when we exit: on Windows, a double-clicked .py or .exe has a
+    console of its own, with only Python (and its launcher) attached. A terminal adds a shell."""
+    if os.name != "nt" or not (sys.stdin and sys.stdin.isatty()):
+        return False
+    return ctypes.windll.kernel32.GetConsoleProcessList((ctypes.c_uint * 4)(), 4) <= 2
+
+
+def stop(message):
+    """Quit with a message, and wait first if the window would close and take it with it."""
+    print(message)
+    if window_closes_on_exit():
+        input("Press Enter to close.")
+    raise SystemExit(1)
+
+
+def load_settings():
+    """Read build-machine.ini into the settings above. The first time, write one to fill in."""
+    global STREAM, PROJECT_FOLDER, SERVER, USER, NAME, PORT, PUBLIC_URL, POLL_SECONDS, TOKEN
+    global CODE_REVIEW_URL, WEBHOOK_URL, WORKSPACE, KEEP_BUILDS, BUILD_TIMEOUT, COOKIE
+    file = SETTINGS_FILE.name
+    if not SETTINGS_FILE.exists():
+        SETTINGS_FILE.write_text(SETTINGS_TEMPLATE, encoding="utf-8")
+        try:
+            os.startfile(SETTINGS_FILE)    # Windows: open it in Notepad
+        except (AttributeError, OSError):  # not Windows, or nothing opens .ini files
+            pass
+        stop(f"Created {SETTINGS_FILE}\nSet your stream in it, then start the build machine again.")
+    try:
+        text = SETTINGS_FILE.read_text("utf-8-sig")
+    except UnicodeDecodeError:
+        stop(f"Save {file} as UTF-8, then start again.")
+    # Strip each line: configparser reads an indented line as more of the setting above, and
+    # deleting only the # leaves a space. Blank out [section] lines, then add the one it needs.
+    lines = ["" if line.startswith("[") else line for line in map(str.strip, text.splitlines())]
+    parser = configparser.ConfigParser(delimiters=("=",), interpolation=None)
+    try:
+        parser.read_string("\n".join(["[settings]", *lines]))
+    except configparser.DuplicateOptionError as error:
+        stop(f"{error.option} is set twice in {file}. Keep one.")
+    except configparser.ParsingError as error:
+        line_number = error.errors[0][0] - 1     # minus the [settings] line added above
+        stop(f"Line {line_number} of {file} isn't a setting: {lines[line_number - 1]}\n"
+             "Settings look like this: stream = //MyGame/main")
+    except configparser.Error as error:
+        stop(f"Can't read {file}: {error}")
+
+    def unquote(value):                # name = "My Game" means My Game
+        return value[1:-1] if len(value) > 1 and value[0] == value[-1] in "\"'" else value
+    values = {key: unquote(value.strip()) for key, value in parser["settings"].items()}
+    known = {"stream", "project_folder", "server", "user", "name", "port", "public_url",
+             "poll_seconds", "token", "code_review_url", "discord_webhook", "workspace",
+             "keep_builds", "build_timeout_minutes"}
+    for key in values.keys() - known:
+        print(f"Ignoring {key} in {file}: no such setting.")
+
+    def number(key, default, low, high=None):
+        text = values.get(key) or str(default)
+        if not re.fullmatch(r"[0-9]+", text) or int(text) < low or (high and int(text) > high):
+            limits = f"from {low} to {high}" if high else f"{low} or more"
+            stop(f"{key} in {file} must be a whole number {limits}, not {text}.")
+        return int(text)
+
+    STREAM = values.get("stream", "").rstrip("./")    # also takes //MyGame/main/... from P4V
+    if not STREAM:
+        stop(f"Set your stream in {SETTINGS_FILE}, like: stream = //MyGame/main")
+    folder = values.get("project_folder", "").replace("\\", "/")
+    if folder.lower().startswith(STREAM.lower() + "/"):   # its full path, pasted in
+        folder = folder[len(STREAM) + 1:]
+    if folder.startswith("/") or ":" in folder or ".." in folder.split("/"):
+        stop(f"project_folder in {file} is a folder in your stream, like Game, "
+             "not a folder on this computer.")
+    PROJECT_FOLDER = folder.strip("/")
+    SERVER, USER = values.get("server", ""), values.get("user", "")
+    NAME = values.get("name") or STREAM.strip("/").split("/")[0]   # //MyGame/main: MyGame
+    PORT = number("port", 8765, 1, 65535)
+    PUBLIC_URL = (values.get("public_url") or f"http://{socket.gethostname()}:{PORT}").rstrip("/")
+    POLL_SECONDS = number("poll_seconds", 60, 0)
+    TOKEN = values.get("token", "")
+    CODE_REVIEW_URL = values.get("code_review_url", "")
+    WEBHOOK_URL = values.get("discord_webhook", "")
+    WORKSPACE = values.get("workspace") or "build-machine"
+    KEEP_BUILDS = number("keep_builds", 20, 1)
+    BUILD_TIMEOUT = number("build_timeout_minutes", 30, 1) * 60
+    COOKIE = f"build_machine_{PORT}"
+
+
 # ---------------------------------------------------------------------------
 # P4
 # ---------------------------------------------------------------------------
+def connection():
+    """The server and user from build-machine.ini, as p4 options. Unset, p4 uses its own."""
+    return [*(["-p", SERVER] if SERVER else []), *(["-u", USER] if USER else [])]
+
+
 def p4(*args, stdin=None):
     """Run a p4 command in the build machine's workspace. Raises if P4 reports an error."""
     # net.maxwait: give up if the network goes silent for a minute, instead of hanging forever.
-    result = subprocess.run(["p4", "-c", WORKSPACE, "-v", "net.maxwait=60", *args], input=stdin,
-                            capture_output=True, encoding="utf-8", errors="replace", cwd=HERE)
+    result = subprocess.run(["p4", *connection(), "-c", WORKSPACE, "-v", "net.maxwait=60", *args],
+                            input=stdin, capture_output=True, encoding="utf-8", errors="replace",
+                            cwd=HERE)
     if result.returncode != 0:
         raise RuntimeError(f"P4 said: {error_text(result.stderr or result.stdout)}")
     return result.stdout
+
+
+def connect():
+    """Check P4 answers and we're logged in. If P4 needs you to trust its server or type your
+    password, it asks here in this window, once each."""
+    tried = set()
+    while True:
+        try:
+            p4("login", "-s")          # is there a ticket that still works?
+            return
+        except FileNotFoundError:
+            stop("Can't find the p4 command. Install P4 CLI from perforce.com, "
+                 "then start again from a new window.")
+        except RuntimeError as error:
+            message = str(error)
+        fix = ("trust" if "p4 trust" in message else
+               "login" if "P4PASSWD" in message or "session has expired" in message else None)
+        if fix is None or fix in tried:
+            hint = ("If you mistyped the password, start again." if fix == "login" else
+                    f"Check server and user in {SETTINGS_FILE.name}.")
+            stop(f"Can't start. {message}\n{hint}")
+        tried.add(fix)
+        print(message)
+        subprocess.run(["p4", *connection(), fix], cwd=HERE)   # p4 asks its own questions
 
 
 def error_text(output):
@@ -141,7 +276,7 @@ def check_workspace():
         print(f"Created workspace {WORKSPACE} for {STREAM} in {WORKSPACE_DIR}")
     elif spec.get("Stream") != STREAM or not same_folder(spec["Root"], WORKSPACE_DIR):
         raise RuntimeError(f"a workspace named {WORKSPACE} already exists for {spec.get('Stream')} "
-                           f"in {spec['Root']}. Choose another WORKSPACE name in the settings.")
+                           f"in {spec['Root']}. Set another workspace in {SETTINGS_FILE.name}.")
 
 
 def same_folder(a, b):
@@ -242,7 +377,7 @@ def poll_forever():
             if change and change != last_built_change():
                 request_build("new change")
             set_problem("")
-        except Exception as error:     # most often an expired P4 ticket: run p4 login
+        except Exception as error:     # most often an expired P4 ticket: restart to log in
             set_problem(error)
         time.sleep(POLL_SECONDS)
 
@@ -290,12 +425,13 @@ def run_build(job):
             say(f"Build {number}: {job['kind']} build of {'shelved' if shelved else 'submitted'} "
                 f"change {change} by {user}")
             get_the_code(change, shelved, from_scratch=release)
-            say(f"Running {BUILD_SCRIPT}")
+            say(f"Running {script_name()}")
             code = run_script(output, change, number, job["kind"], log)
-            say(f"{BUILD_SCRIPT} exited with code {code}")
+            say(f"{script_name()} exited with code {code}")
             passed = code == 0
             if passed and any(output.iterdir()):
-                zip_name = f"{NAME}-{'release-' if release else ''}{'shelf' if shelved else 'cl'}{change}"
+                safe_name = re.sub(r"[^\w.-]+", "-", NAME).strip("-") or "game"  # a file name
+                zip_name = f"{safe_name}-{'release-' if release else ''}{'shelf' if shelved else 'cl'}{change}"
                 shutil.make_archive(str(folder / zip_name), "zip", output)  # adds ".zip" itself
                 build["zip"] = zip_name + ".zip"
                 build["zip_bytes"] = (folder / build["zip"]).stat().st_size
@@ -317,31 +453,40 @@ def run_build(job):
     print(f"Build {number} {build['result']} in {build['seconds']}s: change {change} by {user}")
 
 
-def missing_script(name):
-    """Why the build script wasn't found, and the setting that fixes it. Games often live in a
-    folder of the stream, so look for scripts with that name anywhere in it and suggest one.
-    It only suggests: an Unreal stream with engine source has Build.bat files of its own."""
-    try:
-        found = [os.path.relpath(f["path"], WORKSPACE_DIR).replace(os.sep, "/")
-                 for f in p4_json("have", f"//{WORKSPACE}/.../{name}")]
+def script_name():
+    """The build script's path in the stream: build.bat on Windows, build.sh elsewhere."""
+    return f"{PROJECT_FOLDER}/{BUILD_SCRIPT}" if PROJECT_FOLDER else BUILD_SCRIPT
+
+
+def missing_script():
+    """Why the build script wasn't found, and how to fix it. Games often live in a folder of
+    the stream, so look for the script anywhere in it. Only suggest a folder, never pick one:
+    an Unreal stream with engine source has Build.bat files of its own."""
+    try:                               # exact case only: Unreal's own scripts are Build.bat
+        folders = [os.path.relpath(os.path.dirname(f["path"]), WORKSPACE_DIR).replace(os.sep, "/")
+                   for f in p4_json("have", f"//{WORKSPACE}/.../{BUILD_SCRIPT}")
+                   if os.path.basename(f["path"]) == BUILD_SCRIPT]
     except RuntimeError:
-        found = []
-    missing = f"{STREAM}/{BUILD_SCRIPT} doesn't exist"
-    if len(found) == 1:
-        return f'{missing}, but {found[0]} does. Set BUILD_SCRIPT = "{found[0]}" in the settings.'
-    if found:
-        return (f"{missing}, but these do: {', '.join(found[:5])}. Set BUILD_SCRIPT in the "
-                "settings to the one that builds your game.")
-    return (f"{missing}. Submit your build script, and if it's in a folder, set BUILD_SCRIPT in the "
-            f'settings to its path, e.g. "Game/{name}".')
+        folders = []
+    missing = f"There's no {script_name()} in {STREAM}."
+    if folders == ["."]:
+        return f"{missing} There's one at the top: leave project_folder empty in {SETTINGS_FILE.name}."
+    if len(folders) == 1:
+        return (f"{missing} There's one in {folders[0]}: set project_folder = {folders[0]} "
+                f"in {SETTINGS_FILE.name}.")
+    if folders:
+        places = ", ".join("the top" if f == "." else f for f in folders[:5])
+        return (f"{missing} Found one in each of {places}: set project_folder in "
+                f"{SETTINGS_FILE.name} to the one with your game.")
+    return f"{missing} Submit your build script, and set project_folder if it's in a folder."
 
 
 def run_script(output, change, number, kind, log):
     """Run the build script in its own folder. Stop it, and anything it started (like the
     game in a smoke test), if it runs longer than BUILD_TIMEOUT. Returns its exit code."""
-    script = WORKSPACE_DIR / BUILD_SCRIPT
+    script = WORKSPACE_DIR / PROJECT_FOLDER / BUILD_SCRIPT
     if not script.is_file():
-        raise RuntimeError(missing_script(script.name))
+        raise RuntimeError(missing_script())
     command = [str(script)] if os.name == "nt" else ["bash", str(script)]
     env = {**os.environ, "BUILD_OUTPUT": str(output), "BUILD_CHANGE": change,
            "BUILD_NUMBER": str(number), "BUILD_KIND": kind}
@@ -451,10 +596,10 @@ def load_token():
         # 0o600: on macOS and Linux, only your own account can read it.
         with os.fdopen(os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             f.write(secrets.token_urlsafe(12) + "\n")
-    value = str(TOKEN) or TOKEN_FILE.read_text("utf-8-sig").strip()
+    value = TOKEN or TOKEN_FILE.read_text("utf-8-sig").strip()
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,}", value):  # it goes into URLs, a cookie and a trigger line
-        raise SystemExit("The token must be at least 8 characters, all letters, digits, - or _. "
-                         "Change TOKEN in the settings, or delete token.txt to get a new one.")
+        stop("The token must be at least 8 letters, digits, - or _. Change token in "
+             f"{SETTINGS_FILE.name}, or delete token.txt to get a new one.")
     return value
 
 
@@ -492,12 +637,11 @@ class Handler(BaseHTTPRequestHandler):
         params = self.read_params()
         change, review_url = params.get("change", ""), params.get("update", "")
         if not self.has_token(params):
-            return self.send(403, "Wrong or missing token. The build machine prints the token, "
-                                  "and a team link for its page, when it starts.\n")
+            return self.send(403, "Wrong or missing token. The build machine shows it when it starts.\n")
         if change and not re.fullmatch(r"[0-9]{1,10}", change):
             return self.send(400, "change must be a changelist number\n")
         if review_url and not is_code_review_url(review_url):
-            return self.send(400, "update must point at CODE_REVIEW_URL (see the settings)\n")
+            return self.send(400, f"update must point at code_review_url in {SETTINGS_FILE.name}\n")
 
         reason = (params.get("reason") or ("Code Review" if review_url else "request"))[:40]
         kind = "release" if params.get("kind") == "release" else "test"
@@ -610,16 +754,14 @@ def status_page(can_build):
         banner = (f'<div class="banner {latest["result"]}">{label}: change {e(latest["change"])} '
                   f'by {e(latest["user"])}<span>{e(latest["desc"])}</span></div>')
     if problem:
-        banner += (f'<div class="banner failed">Problem: {e(problem)}<span>If P4 asks you to '
-                   'log in, run p4 login on the build machine.</span></div>')
+        banner += (f'<div class="banner failed">Problem: {e(problem)}<span>If P4 wants a password, '
+                   'restart the build machine and type it there.</span></div>')
     if good:
         banner += download_link("/latest", "good build", good)
     if good_release and good_release is not good:
         banner += download_link("/latest-release", "release build", good_release)
     if good:
-        banner += ('<p><small>Unzip it, then start the game inside. The link always gets the newest '
-                   'good build, so it\'s worth a bookmark. Every earlier build that passed has its '
-                   'own Download link in the list below.</small></p>')
+        banner += '<p><small>Unzip it, then run the game. Earlier builds are below.</small></p>'
 
     waiting = []
     for job in list(queue):
@@ -651,10 +793,8 @@ def status_page(can_build):
 <form method="post" action="/build"><input type="hidden" name="reason" value="button">
 <input type="hidden" name="force" value="1">{token_box}<button>Build now</button>
 <button name="kind" value="release">Release build</button></form>
-<p><small>{"" if can_build else "Starting a build needs the token. Open the team link once and this "
-"browser remembers it: whoever runs the build machine has the link. "}A release build deletes
-everything the last build left behind and starts over, so it takes longer, and it builds the
-game the way players get it.</small></p>
+<p><small>{"" if can_build else "To start builds, open the team link from whoever runs the build machine. "}Release builds start
+from scratch and make the version players get. They're slower.</small></p>
 <p id="offline" hidden><b>Can't reach the build machine. Still trying…</b></p>
 <div id="live">{banner}
 <p>{"Waiting: " + ", ".join(waiting) if waiting else ""}</p>
@@ -682,28 +822,29 @@ document.addEventListener("visibilitychange", () => {{ if (!document.hidden) upd
 
 def main():
     global token
-    # A name or path the console can't show gets escaped instead of crashing.
-    sys.stdout.reconfigure(errors="backslashreplace")
+    # A name or path the console can't show gets escaped instead of crashing. And print each
+    # line straight away, even when the output goes to a file.
+    sys.stdout.reconfigure(errors="backslashreplace", line_buffering=True)
+    load_settings()
+    connect()
     BUILDS_DIR.mkdir(exist_ok=True)
     load_history()
     token = load_token()
     try:
         check_workspace()
     except RuntimeError as error:
-        raise SystemExit(f"Can't start: {error}\nCheck that `p4 info` works in this terminal "
-                         "(run `p4 login` if it asks for a password).")
+        stop(f"Can't start: {error}")
     try:
         server = ThreadingHTTPServer(("", PORT), Handler)
     except OSError as error:
-        raise SystemExit(f"Can't use port {PORT}, probably because another program already is "
-                         f"({error}). Choose another PORT in the settings.")
+        stop(f"Port {PORT} is taken, probably by another program ({error}). "
+             f"Set another port in {SETTINGS_FILE.name}.")
     threading.Thread(target=build_forever, daemon=True).start()
     if POLL_SECONDS:
         threading.Thread(target=poll_forever, daemon=True).start()
-    print(f"{NAME} build machine on {PUBLIC_URL} building {STREAM} (Ctrl+C to stop)\n"
-          f"Team link, for anyone who should be able to start builds from the page:\n"
-          f"    {PUBLIC_URL}/?token={token}\n"
-          f"Token, for the P4 trigger and P4 Code Review: {token}")
+    print(f"Building {STREAM} at {PUBLIC_URL}. Close this window or press Ctrl+C to stop.\n"
+          f"Team link, to start builds too (share it only with your team): {PUBLIC_URL}/?token={token}\n"
+          f"Token, for a P4 trigger or Code Review: {token}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -711,4 +852,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:                  # show what went wrong before a double-clicked window closes
+        traceback.print_exc()
+        stop("The build machine stopped because of the error above.")

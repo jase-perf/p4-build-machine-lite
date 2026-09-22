@@ -1,7 +1,6 @@
-// Put this anywhere under Assets/ (not in an Editor folder).
-// It does nothing in normal play. When the game is started with -smoketest,
-// it quits after 5 seconds, with exit code 1 if anything logged an error or
-// exception, so a build script can tell a broken build from a healthy one.
+// Keep this under Assets/, outside any Editor folder. It does nothing in normal play.
+// Started with -smoketest, the game quits after 5 seconds, with exit code 1 if
+// anything logged an error, so build.bat can tell a broken build from a good one.
 using System;
 using System.Collections;
 using UnityEngine;

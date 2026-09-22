@@ -1,10 +1,6 @@
-// Put this in a folder called Editor anywhere under Assets/ (Unity only runs
-// -executeMethod on scripts that live in an Editor folder).
-//
-// build.bat runs it with: Unity.exe -batchmode -quit -executeMethod BuildScript.Build
-// It builds the scenes from File > Build Profiles > Scene List into BUILD_OUTPUT.
-// A test build is a Development Build, which keeps Unity's error reporting and the
-// profiler. A release build is what players get: no development extras.
+// Keep this in Assets/Editor: Unity only runs -executeMethod on Editor scripts.
+// build.bat calls it to build the scenes in Build Profiles into BUILD_OUTPUT:
+// a Development Build for test builds, a normal one for release builds.
 using System;
 using System.IO;
 using System.Linq;
