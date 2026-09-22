@@ -6,12 +6,13 @@ For indie teams, solo devs and game jams that don't need Jenkins, TeamCity or Ho
 
 ## Setup
 
-You need a computer that can build your game, with Python 3.9+ and the p4 command line (P4 CLI, from perforce.com).
+You need a computer that can build your game, with the p4 command line (P4 CLI, from perforce.com).
 
-1. **Add a build script to your project.** Copy an example folder's contents into your project's top folder (the one with `project.godot`, `Assets` or the `.uproject`), and submit them, `.p4ignore` included (merge it into yours if you have one): [Godot](examples/godot) · [Unity](examples/unity) · [Unreal](examples/unreal)
-2. **Start the build machine** on the build computer. Put `build_machine.py` in a folder of its own and run `py build_machine.py` (Windows) or `python3 build_machine.py` (macOS, Linux). If Windows asks, allow it through the firewall, for private and public networks, so teammates can reach it.
-3. **Fill in `build-machine.ini`**, which the first run creates. Set `stream`, and `project_folder` if your project is in a folder of the stream. If the p4 command isn't set up for your server, set `server` and `user` too. Then start it again: it reads the file only when it starts.
-4. **Open the team link it shows**, and share it only with your team: anyone with it can start builds.
+1. **Add the build scripts to your project.** Copy everything in an example folder into your project's top folder (the one with `project.godot`, `Assets` or the `.uproject`), and submit it: [Godot](examples/godot) · [Unity](examples/unity) · [Unreal](examples/unreal). Keep both `build.bat` (Windows) and `build.sh` (macOS, Linux), so a build machine on either can build it.
+2. **Get the build machine** for [Windows, macOS or Linux](../../releases/latest) and unzip it. The Mac one is for Apple silicon. (Or, with Python 3.9+, use `build_machine.py` from this repo.)
+3. **Start it** on the build computer: double-click `build-machine` (on Linux, run `./build-machine`), or run `py build_machine.py` (Windows) or `python3 build_machine.py` (macOS, Linux). It isn't signed, so the first time, Windows may say it protected your PC (click **More info**, then **Run anyway**), and macOS may refuse to open it (click **Open Anyway** in System Settings › Privacy & Security). If Windows asks, allow it through the firewall, for private and public networks, so teammates can reach it.
+4. **Fill in `build-machine.ini`**, which the first run creates and, on Windows and macOS, opens. Set `stream`, and `project_folder` if your project is in a folder of the stream. If the p4 command isn't set up for your server, set `server` and `user` too. Then start it again: it reads the file only when it starts.
+5. **Open the team link it shows**, and share it only with your team: anyone with it can start builds.
 
 If P4 needs you to trust the server or log in, the build machine asks in its window. The first build starts within a minute.
 
@@ -30,8 +31,8 @@ Send this to your team:
 
 1. Click **Download** on the build machine's page.
 2. Unzip it (on Windows, right-click › **Extract All**). Don't run the game from inside the zip.
-3. Run the game's `.exe`.
-4. If Windows says it protected your PC, click **More info**, then **Run anyway**. The game just isn't signed.
+3. Run the game: its `.exe` on Windows, its `.app` on a Mac.
+4. If Windows says it protected your PC, click **More info**, then **Run anyway**. If macOS won't open it, click **Open Anyway** in System Settings › Privacy & Security. The game just isn't signed.
 
 ## Build scripts
 
@@ -44,9 +45,11 @@ The build machine runs `build.bat` (Windows) or `build.sh` (macOS, Linux) in the
 | `BUILD_CHANGE` | The changelist being built |
 | `BUILD_NUMBER` | The build's number |
 
+Settings in capitals in `build-machine.ini`, like `GODOT = C:\Godot\godot.exe`, are set too.
+
 Exit with `0` to pass. The Godot and Unity examples also run the game for a few seconds and fail if it crashes or logs an error: both engines report success for games that break the moment they start.
 
-Before each build, the workspace is reset to match P4, except what your `.p4ignore` lists. Ignore your engine's cache folders and test builds stay fast. Release builds delete those too, and everything else that isn't in P4, so don't keep or link anything in the build machine's `workspace` folder.
+Before each build, the workspace is reset to match P4, except what your depot's `.p4ignore` lists. If it lists your engine's cache folders (`.godot/`, `Library/`, `Intermediate/`), test builds stay fast. Release builds delete those too, and everything else that isn't in P4, so don't keep or link anything in the build machine's `workspace` folder.
 
 ## Extras
 
@@ -68,7 +71,11 @@ Submitters then see `Build queued` after `Change N submitted`. If the build mach
 2. Make sure a Code Review project has a branch covering your stream, like `//MyGame/main/...`. Without one, stream shelves don't become reviews.
 3. Add a test to a workflow, with URL `http://BUILD-PC:8765/build` and this body, URL encoded: `change={change}&status={status}&update={update}&token=TOKEN`
 
-Each review is built with the newest code merged in, and shows pass or fail with a link to the log. "There was no response" means Code Review couldn't reach `BUILD-PC`.
+Each review is built with the newest code merged in, and shows pass or fail with a link to the log. Locked (`+l`) files are copied in as shelved, so reviews build even while their author keeps them checked out. "There was no response" means Code Review couldn't reach `BUILD-PC`.
+
+### Build on Windows and a Mac
+
+Run a build machine on each, with the same `stream` and `project_folder`, and its own `name`, like `MyGame (Mac)`, so pages, zips and Discord posts say which is which. Each has its own workspace, page and token, and builds every submit with its own script. For instant builds, give each one its own trigger line with a different name, like `buildmachine-win` and `buildmachine-mac`: P4 runs only the first of two lines with the same name. For Code Review, add a test for each.
 
 ### P4 in containers
 
@@ -86,9 +93,9 @@ Set `discord_webhook` in `build-machine.ini` to post each pass or fail to a chan
 ## Good to know
 
 - **P4 logins expire,** after 12 hours by default. When the page shows a P4 password problem, restart the build machine and log in there. For a long jam, put its user in a P4 group with a longer `Timeout`.
-- **Godot:** install the export templates on the build computer, and submit `export_presets.cfg` and your `.uid` files.
-- **Unity:** sign into Unity Hub on the build computer (Personal works). Keep `BuildScript.cs` in `Assets/Editor`, and submit the `.meta` files.
-- **Unreal:** C++ projects need Visual Studio on the build computer. Release builds package Shipping, so the game inside is `UnrealGame-Win64-Shipping.exe` rather than `UnrealGame.exe`.
+- **Godot:** install the export templates on the build computer, and submit `export_presets.cfg` and your `.uid` files. If `godot` isn't on the PATH (or in Applications on a Mac), set `GODOT` in `build-machine.ini` to your Godot program; on Windows, the `_console.exe` one.
+- **Unity:** install your project's Unity version with Unity Hub, in its usual folder, and sign in (Personal works): the scripts find it there. Otherwise set `UNITY` in `build-machine.ini`. Keep `BuildScript.cs` in `Assets/Editor`, and submit the `.meta` files.
+- **Unreal:** on Windows the scripts find engines from the Epic Games Launcher and registered source builds; on a Mac, launcher engines. Otherwise set `UE_ROOT` in `build-machine.ini`. C++ projects need Visual Studio (Windows), and Mac builds need Xcode. Release builds package Shipping, so the game inside is `UnrealGame-Win64-Shipping.exe` rather than `UnrealGame.exe`.
 
 ## Limits
 
@@ -106,7 +113,7 @@ When you outgrow it, the usual next steps for P4 teams are TeamCity (its free ed
 
 ## Verified with
 
-Windows 11, Python 3.13, Godot 4.7.2, Unity 6000.3, Unreal 5.7, P4 2025.x and 2026.1, and P4 Code Review 2026.3. Godot and Unity ran end to end through the build machine; Unity's release build and Unreal's were run by hand. Not yet tested: Discord, and the build machine itself on macOS or Linux.
+Windows 11, Python 3.13, Godot 4.7.2, Unity 6000.3, Unreal 5.7, P4 2025.x and 2026.1, and P4 Code Review 2026.3. Godot and Unity ran end to end through the build machine; Unity's release build and Unreal's were run by hand. The Godot `build.sh` ran on Ubuntu, where the Linux build machine was also built and started. Not yet tested: anything on macOS (the Mac parts of the `build.sh` scripts, and the Mac build machine), the Unity and Unreal `build.sh` scripts, and Discord.
 
 ## License
 

@@ -1,4 +1,0 @@
-# Godot: the import cache and local builds stay out of P4.
-.godot/
-build/
-smoke.log

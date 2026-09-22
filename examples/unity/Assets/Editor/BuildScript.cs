@@ -1,6 +1,6 @@
 // Keep this in Assets/Editor: Unity only runs -executeMethod on Editor scripts.
-// build.bat calls it to build the scenes in Build Profiles into BUILD_OUTPUT:
-// a Development Build for test builds, a normal one for release builds.
+// build.bat and build.sh call it to build the scenes in Build Profiles into BUILD_OUTPUT,
+// for the computer it runs on: a Development Build for test builds, a normal one for release.
 using System;
 using System.IO;
 using System.Linq;
@@ -16,13 +16,19 @@ public static class BuildScript
         if (string.IsNullOrEmpty(output))
             output = Path.Combine(Directory.GetCurrentDirectory(), "build");
         var release = Environment.GetEnvironmentVariable("BUILD_KIND") == "release";
+        var (target, file) = Application.platform switch
+        {
+            RuntimePlatform.OSXEditor => (BuildTarget.StandaloneOSX, "MyGame.app"),
+            RuntimePlatform.LinuxEditor => (BuildTarget.StandaloneLinux64, "MyGame.x86_64"),
+            _ => (BuildTarget.StandaloneWindows64, "MyGame.exe"),
+        };
 
         var options = new BuildPlayerOptions
         {
             scenes = EditorBuildSettings.scenes.Where(scene => scene.enabled)
                                               .Select(scene => scene.path).ToArray(),
-            locationPathName = Path.Combine(output, "MyGame.exe"),
-            target = BuildTarget.StandaloneWindows64,
+            locationPathName = Path.Combine(output, file),
+            target = target,
             options = release ? BuildOptions.None : BuildOptions.Development,
         };
         if (options.scenes.Length == 0)

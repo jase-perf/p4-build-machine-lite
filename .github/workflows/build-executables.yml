@@ -1,0 +1,72 @@
+# Builds build_machine.py into one program each for Windows, macOS and Linux, with PyInstaller.
+# Push a tag like v1.0 and they're attached to a GitHub release for that tag. It can also be
+# run by hand from the Actions tab, which builds them without making a release.
+name: Build executables
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            zip: build-machine-windows.zip
+          - os: macos-latest           # Apple silicon
+            zip: build-machine-macos.zip
+          - os: ubuntu-22.04           # an older Linux, so it runs on more versions (retired in time)
+            zip: build-machine-linux.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pyinstaller==6.22.3
+      - run: pyinstaller --onefile --console --name build-machine build_machine.py
+
+      - name: Check it starts and reads the settings file next to it
+        shell: bash
+        run: |
+          mkdir build-machine
+          mv dist/build-machine* build-machine/
+          cd build-machine
+          echo "stream = //test/main" > build-machine.ini
+          ./build-machine < /dev/null > out.txt 2>&1 || true
+          cat out.txt
+          grep -q "Can't find the p4 command" out.txt    # these runners have no p4, as expected
+          rm build-machine.ini out.txt
+
+      - name: Zip it, in a folder of its own (keeping it runnable on macOS and Linux)
+        run: python -m zipfile -c "${{ matrix.zip }}" build-machine
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.zip }}
+          path: ${{ matrix.zip }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - name: Attach them to the tag's release, making it if needed
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" build-machine-*.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" build-machine-*.zip --repo "$GITHUB_REPOSITORY" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

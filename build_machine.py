@@ -21,6 +21,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -28,6 +29,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -71,8 +73,12 @@ project_folder =
 # A Discord channel webhook, to post each pass or fail.
 # discord_webhook =
 
-# The build machine's own P4 workspace, how many builds to keep,
-# and how long a build may take.
+# Settings in capitals go to your build script as environment variables,
+# like telling the Godot example where Godot is:
+# GODOT = C:\\Godot\\Godot_v4.7.2-stable_win64_console.exe
+
+# The build machine's own P4 workspace (named after this computer if not set),
+# how many builds to keep, and how long a build may take.
 # workspace = build-machine
 # keep_builds = 20
 # build_timeout_minutes = 30
@@ -94,6 +100,7 @@ BUILD_TIMEOUT = 30 * 60            # seconds
 MAX_WAITING = 10                   # build requests that can wait at once
 BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"
 COOKIE = "build_machine_8765"      # named by port, so two build machines on one PC don't clash
+SCRIPT_ENV = {}                    # settings in capitals, for the build script
 
 # A PyInstaller .exe runs from a temporary folder, so its own files go next to the .exe.
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
@@ -129,13 +136,16 @@ def stop(message):
 def load_settings():
     """Read build-machine.ini into the settings above. The first time, write one to fill in."""
     global STREAM, PROJECT_FOLDER, SERVER, USER, NAME, PORT, PUBLIC_URL, POLL_SECONDS, TOKEN
-    global CODE_REVIEW_URL, WEBHOOK_URL, WORKSPACE, KEEP_BUILDS, BUILD_TIMEOUT, COOKIE
+    global CODE_REVIEW_URL, WEBHOOK_URL, WORKSPACE, KEEP_BUILDS, BUILD_TIMEOUT, COOKIE, SCRIPT_ENV
     file = SETTINGS_FILE.name
     if not SETTINGS_FILE.exists():
         SETTINGS_FILE.write_text(SETTINGS_TEMPLATE, encoding="utf-8")
-        try:
-            os.startfile(SETTINGS_FILE)    # Windows: open it in Notepad
-        except (AttributeError, OSError):  # not Windows, or nothing opens .ini files
+        try:                           # open it: Notepad on Windows, TextEdit on a Mac
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-t", str(SETTINGS_FILE)])
+            else:
+                os.startfile(SETTINGS_FILE)
+        except (AttributeError, OSError):  # Linux, or nothing opens .ini files
             pass
         stop(f"Created {SETTINGS_FILE}\nSet your stream in it, then start the build machine again.")
     try:
@@ -146,6 +156,7 @@ def load_settings():
     # deleting only the # leaves a space. Blank out [section] lines, then add the one it needs.
     lines = ["" if line.startswith("[") else line for line in map(str.strip, text.splitlines())]
     parser = configparser.ConfigParser(delimiters=("=",), interpolation=None)
+    parser.optionxform = str           # keep capitals, for the build script's settings below
     try:
         parser.read_string("\n".join(["[settings]", *lines]))
     except configparser.DuplicateOptionError as error:
@@ -159,10 +170,15 @@ def load_settings():
 
     def unquote(value):                # name = "My Game" means My Game
         return value[1:-1] if len(value) > 1 and value[0] == value[-1] in "\"'" else value
-    values = {key: unquote(value.strip()) for key, value in parser["settings"].items()}
+    everything = {key: unquote(value.strip()) for key, value in parser["settings"].items()}
     known = {"stream", "project_folder", "server", "user", "name", "port", "public_url",
              "poll_seconds", "token", "code_review_url", "discord_webhook", "workspace",
              "keep_builds", "build_timeout_minutes"}
+    # Other settings in capitals, like GODOT = C:\Godot\godot.exe, go to the build script as
+    # environment variables. The rest are ours, in any case.
+    SCRIPT_ENV = {key: value for key, value in everything.items()
+                  if key.isupper() and key.lower() not in known}
+    values = {key.lower(): value for key, value in everything.items() if key not in SCRIPT_ENV}
     for key in values.keys() - known:
         print(f"Ignoring {key} in {file}: no such setting.")
 
@@ -191,7 +207,10 @@ def load_settings():
     TOKEN = values.get("token", "")
     CODE_REVIEW_URL = values.get("code_review_url", "")
     WEBHOOK_URL = values.get("discord_webhook", "")
-    WORKSPACE = values.get("workspace") or "build-machine"
+    # Named after this computer, so build machines on Windows and a Mac can share a server.
+    # Just the first part of the name: a Mac's changes with the network (Name.local, Name.lan).
+    WORKSPACE = values.get("workspace") or re.sub(
+        r"[^A-Za-z0-9-]+", "-", f"build-machine-{socket.gethostname().split('.')[0]}")
     KEEP_BUILDS = number("keep_builds", 20, 1)
     BUILD_TIMEOUT = number("build_timeout_minutes", 30, 1) * 60
     COOKIE = f"build_machine_{PORT}"
@@ -311,11 +330,6 @@ def get_the_code(change, shelved, from_scratch=False):
     p4("clean", *(["-I"] if from_scratch else []), everything)
     if shelved:
         p4("unshelve", "-s", change)   # opens the shelf's files at the revisions it started from
-        opened = p4_json("opened", everything)
-        in_shelf = p4_json("files", f"@={change}")
-        if len(opened) < len(in_shelf):
-            raise RuntimeError(f"only {len(opened)} of the {len(in_shelf)} files in shelf {change} "
-                               f"could be unshelved into {STREAM}")
         # Merge in whatever teammates submitted to those files since, as P4 would at submit.
         # Skip this and a shelf silently undoes their newer work in the build.
         p4("sync", "-q", everything)
@@ -324,6 +338,37 @@ def get_the_code(change, shelved, from_scratch=False):
         if conflicts:
             raise RuntimeError(f"shelf {change} conflicts with newer changes in {len(conflicts)} "
                                "file(s). Resolve and shelve again.")
+        copy_locked_files(change, {f["depotFile"] for f in p4_json("opened", everything)})
+
+
+def copy_locked_files(change, opened):
+    """Copy in the shelved files that couldn't be unshelved because they're locked (+l).
+    A locked file can't be opened here while it's open anywhere else: by the author, who may
+    have kept it checked out after shelving, or by another build machine testing this shelf.
+    If nobody has submitted it since the shelf was made there's nothing to merge, so the
+    shelf's copy is exactly what submitting would give. Anything else is an error."""
+    for shelf_file in p4_json("files", f"@={change}"):
+        depot = shelf_file["depotFile"]
+        if depot in opened:
+            continue
+        # The last mapping is the one that applies; an excluded path has only "unmap" ones.
+        mapped = [w for w in p4_json("where", depot)
+                  if "unmap" not in w and not w["depotFile"].startswith("-")]
+        if not mapped:
+            raise RuntimeError(f"shelf {change} has files outside {STREAM}, like {depot}")
+        if "l" not in shelf_file["type"].partition("+")[2]:
+            raise RuntimeError(f"{depot} in shelf {change} couldn't be unshelved into {STREAM}")
+        if shelf_file["action"] in ("edit", "integrate"):
+            head = p4_json("files", depot)
+            if not head or head[0]["rev"] != shelf_file["rev"]:
+                raise RuntimeError(f"{depot} is locked and was changed after shelf {change} was "
+                                   "made. Unshelve it, resolve, and shelve again.")
+        path = Path(mapped[-1]["path"])
+        if "delete" in shelf_file["action"]:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            p4("print", "-q", "-o", str(path), f"{depot}@={change}")
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +477,7 @@ def run_build(job):
             if passed and any(output.iterdir()):
                 safe_name = re.sub(r"[^\w.-]+", "-", NAME).strip("-") or "game"  # a file name
                 zip_name = f"{safe_name}-{'release-' if release else ''}{'shelf' if shelved else 'cl'}{change}"
-                shutil.make_archive(str(folder / zip_name), "zip", output)  # adds ".zip" itself
+                zip_folder(output, folder / f"{zip_name}.zip")
                 build["zip"] = zip_name + ".zip"
                 build["zip_bytes"] = (folder / build["zip"]).stat().st_size
         except Exception as error:
@@ -481,6 +526,23 @@ def missing_script():
     return f"{missing} Submit your build script, and set project_folder if it's in a folder."
 
 
+def zip_folder(folder, zip_path):
+    """Zip a folder, keeping links as links and programs runnable: a macOS app has links
+    inside it, and following them would break its signature ("the app is damaged")."""
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for root, dirs, files in os.walk(folder):
+            for name in dirs + files:
+                path = Path(root, name)
+                inside = path.relative_to(folder).as_posix()
+                if path.is_symlink():
+                    link = zipfile.ZipInfo(inside)
+                    link.create_system = 3     # Unix, so unzip reads the mode below
+                    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+                    archive.writestr(link, os.readlink(path))
+                elif path.is_file():
+                    archive.write(path, inside)
+
+
 def run_script(output, change, number, kind, log):
     """Run the build script in its own folder. Stop it, and anything it started (like the
     game in a smoke test), if it runs longer than BUILD_TIMEOUT. Returns its exit code."""
@@ -488,7 +550,7 @@ def run_script(output, change, number, kind, log):
     if not script.is_file():
         raise RuntimeError(missing_script())
     command = [str(script)] if os.name == "nt" else ["bash", str(script)]
-    env = {**os.environ, "BUILD_OUTPUT": str(output), "BUILD_CHANGE": change,
+    env = {**os.environ, **SCRIPT_ENV, "BUILD_OUTPUT": str(output), "BUILD_CHANGE": change,
            "BUILD_NUMBER": str(number), "BUILD_KIND": kind}
     # On macOS/Linux, a new session groups the script with everything it starts, so the
     # timeout can stop them all at once. On Windows, taskkill /T does the same job.
@@ -822,6 +884,13 @@ document.addEventListener("visibilitychange", () => {{ if (!document.hidden) upd
 
 def main():
     global token
+    if getattr(sys, "frozen", False):  # a PyInstaller program points what it starts at its own
+        if os.name == "nt":            # libraries: undo that for p4, the engines and the script
+            ctypes.windll.kernel32.SetDllDirectoryW(None)
+        elif "LD_LIBRARY_PATH_ORIG" in os.environ:
+            os.environ["LD_LIBRARY_PATH"] = os.environ.pop("LD_LIBRARY_PATH_ORIG")
+        else:
+            os.environ.pop("LD_LIBRARY_PATH", None)
     # A name or path the console can't show gets escaped instead of crashing. And print each
     # line straight away, even when the output goes to a file.
     sys.stdout.reconfigure(errors="backslashreplace", line_buffering=True)
