@@ -1,6 +1,7 @@
 # Python bytecode
 __pycache__/
 
-# Made by build_machine.py when it runs here
+# Made by build_machine.py when it runs here (token.txt is its password: never commit it)
 workspace/
 builds/
+token.txt

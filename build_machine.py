@@ -17,12 +17,13 @@ There are two kinds of build:
     release build  asked for by hand. It deletes everything the last build left behind
                    and starts over, and your script builds the game the way players get it.
 
-Ways to start a build (add token=<TOKEN> to each one if you set TOKEN):
+Ways to start a build. Every one but polling needs the token, which the build
+machine makes on its first run and prints, along with a team link, when it starts:
     Polling:         every POLL_SECONDS it asks P4 whether anything new was submitted.
-    P4 trigger:      buildmachine change-commit //project/main/... "curl -s -m 5 -X POST http://HOST:8765/build?reason=p4-trigger"
-    P4 Code Review:  a test with URL http://HOST:8765/build and body change={change}&status={status}&update={update}
-    By hand:         the Build now and Release build buttons on the status page, or
-                     curl -X POST http://HOST:8765/build and .../build?kind=release
+    P4 trigger:      buildmachine change-commit //project/main/... "curl -s -m 5 -d reason=p4-trigger -d token=TOKEN http://HOST:8765/build"
+    P4 Code Review:  a test with URL http://HOST:8765/build and body change={change}&status={status}&update={update}&token=TOKEN
+    By hand:         the Build now and Release build buttons on the status page, after
+                     opening the team link once in that browser
 
 Your build script runs in its own folder with four environment variables:
     BUILD_OUTPUT   an empty folder: put the playable game here and it becomes the zip
@@ -32,7 +33,7 @@ Your build script runs in its own folder with four environment variables:
 Exit with 0 and the build passes. Anything else and it fails.
 
 Anyone who can reach this computer's port can read the page, the logs and the
-zips, so run it on a network you trust. TOKEN stops strangers starting builds.
+zips, so run it on a network you trust. Only the token lets anyone start a build.
 
 Needs Python 3.9+ and the p4 command line, and nothing else.
     Windows:        py build_machine.py
@@ -43,6 +44,7 @@ import html
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -65,18 +67,22 @@ WORKSPACE = "build-machine"        # the build machine's own workspace, created 
 BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"  # its path inside the stream
 PORT = 8765
 POLL_SECONDS = 60                  # ask P4 for new changes this often (0 = never)
-TOKEN = ""                         # if set, starting a build needs token=<TOKEN>
+TOKEN = ""                         # the password for starting builds: 8+ letters, digits, - or _.
+                                   # Leave it empty and one is made for you, kept in token.txt
 CODE_REVIEW_URL = ""               # your P4 Code Review address, e.g. "http://review.local"
 WEBHOOK_URL = ""                   # optional Discord webhook for pass/fail messages
 PUBLIC_URL = f"http://{socket.gethostname()}:{PORT}"  # how teammates reach this page
-KEEP_BUILDS = 20                   # older build folders are deleted, except the newest good one
+KEEP_BUILDS = 20                   # older builds are deleted, except the newest good one of each kind
 BUILD_TIMEOUT = 30 * 60            # seconds before a stuck build is stopped
 MAX_WAITING = 10                   # build requests that can wait at once
 
 HERE = Path(__file__).resolve().parent
 WORKSPACE_DIR = HERE / "workspace"
 BUILDS_DIR = HERE / "builds"
+TOKEN_FILE = HERE / "token.txt"
+COOKIE = f"build_machine_{PORT}"   # named by port, so two build machines on one PC don't clash
 
+token = ""                         # TOKEN, or the one in token.txt (see load_token)
 history = []                       # every build started, oldest first (saved in builds/history.json)
 queue = []                         # build requests waiting their turn, oldest first
 problem = ""                       # the last error, shown on the status page
@@ -290,6 +296,7 @@ def run_build(job):
                 zip_name = f"{NAME}-{'release-' if release else ''}{'shelf' if shelved else 'cl'}{change}"
                 shutil.make_archive(str(folder / zip_name), "zip", output)  # adds ".zip" itself
                 build["zip"] = zip_name + ".zip"
+                build["zip_bytes"] = (folder / build["zip"]).stat().st_size
         except Exception as error:
             say(f"ERROR: {error}")
         finally:
@@ -414,14 +421,38 @@ def is_code_review_url(url):
 
 # ---------------------------------------------------------------------------
 # The web side: build requests (POST /build), the status page, and the files.
+# Anyone who can reach the page can look and download. Starting a build needs
+# the token: in the request, or in the cookie the team link leaves behind.
 # ---------------------------------------------------------------------------
+def load_token():
+    """TOKEN if you set one. Otherwise the one in token.txt, made the first time."""
+    if not TOKEN and (not TOKEN_FILE.exists() or not TOKEN_FILE.read_text("utf-8-sig").strip()):
+        # 0o600: on macOS and Linux, only your own account can read it.
+        with os.fdopen(os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            f.write(secrets.token_urlsafe(12) + "\n")
+    value = str(TOKEN) or TOKEN_FILE.read_text("utf-8-sig").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,}", value):  # it goes into URLs, a cookie and a trigger line
+        raise SystemExit("The token must be at least 8 characters, all letters, digits, - or _. "
+                         "Change TOKEN in the settings, or delete token.txt to get a new one.")
+    return value
+
+
+def token_matches(given):
+    # compare_digest is a != that can't be timed. And no token must ever mean "no entry".
+    return bool(token) and hmac.compare_digest(given.encode(), token.encode())
+
+
 class Handler(BaseHTTPRequestHandler):
     timeout = 60                       # drop connections that go quiet, so they can't pile up
 
     def do_GET(self):
-        path = urllib.parse.urlsplit(self.path).path
+        url = urllib.parse.urlsplit(self.path)
+        path = url.path
         if path == "/":
-            self.send(200, status_page(), "text/html; charset=utf-8")
+            query = dict(urllib.parse.parse_qsl(url.query))
+            if "token" in query and self.has_token(query):
+                return self.redirect("/", remember_token=True)  # the team link: remember it, tidy the URL
+            self.send(200, status_page(can_build=self.has_token({})), "text/html; charset=utf-8")
         elif path in ("/latest", "/latest-release"):
             kind = "release" if path == "/latest-release" else None
             good = newest_build(good=True, kind=kind)
@@ -439,8 +470,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, "Not found\n")
         params = self.read_params()
         change, review_url = params.get("change", ""), params.get("update", "")
-        if TOKEN and not hmac.compare_digest(params.get("token", ""), TOKEN):  # a timing-safe !=
-            return self.send(403, "Wrong or missing token\n")
+        if not self.has_token(params):
+            return self.send(403, "Wrong or missing token. The build machine prints the token, "
+                                  "and a team link for its page, when it starts.\n")
         if change and not re.fullmatch(r"[0-9]{1,10}", change):
             return self.send(400, "change must be a changelist number\n")
         if review_url and not is_code_review_url(review_url):
@@ -459,9 +491,21 @@ class Handler(BaseHTTPRequestHandler):
         if not queued:
             self.send(503, "Too many builds waiting. Try again soon.\n")
         elif "text/html" in self.headers.get("Accept", ""):
-            self.redirect("/")                       # the Build now button: back to the page
+            self.redirect("/", remember_token=True)  # a button: back to the page, token remembered
         else:
             self.send(202, f"Build queued: {PUBLIC_URL}\n")  # the submitter sees this in p4 submit
+
+    def has_token(self, params):
+        """Whether the request carries the token, as token=... or in the team link's cookie."""
+        if params.get("token"):
+            return token_matches(params["token"])
+        # Browsers send the cookie with a form posted from any page on this computer, whatever
+        # port it's on, so the cookie only counts for requests from this page itself.
+        origin = self.headers.get("Origin")
+        if origin and origin.lower() != "http://" + self.headers.get("Host", "").lower():
+            return False
+        cookies = (part.strip().partition("=") for part in self.headers.get("Cookie", "").split(";"))
+        return any(name == COOKIE and token_matches(value) for name, _, value in cookies)
 
     def read_params(self):
         """Parameters from the URL (?a=1&b=2) and from a form-style body, merged."""
@@ -493,12 +537,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Frame-Options", "DENY")   # no other page can show this one and trick a click
         self.end_headers()
         self.wfile.write(data)
 
-    def redirect(self, location):
+    def redirect(self, location, remember_token=False):
         self.send_response(303)
         self.send_header("Location", location)
+        if remember_token:             # a cookie, so this browser can press the buttons from now on
+            # HttpOnly: scripts can't read it. SameSite=Lax: forms on other websites don't send it.
+            self.send_header("Set-Cookie", f"{COOKIE}={token}; Path=/; Max-Age={365 * 24 * 3600}; "
+                                           "HttpOnly; SameSite=Lax")
         self.end_headers()
 
     def log_message(self, *args):
@@ -516,7 +565,18 @@ td, th { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #d0d7d
 """
 
 
-def status_page():
+def megabytes(build):
+    """How big a build's zip is, e.g. "34.5 MB", so people know whether to download it now.
+    Builds from before the build machine recorded sizes show nothing."""
+    return f'{build["zip_bytes"] / 1e6:.1f} MB' if build.get("zip_bytes") else ""
+
+
+def download_link(url, what, build):
+    details = ", ".join(filter(None, [f'change {html.escape(build["change"])}', megabytes(build)]))
+    return f'<p><a href="{url}">Download the newest {what}</a> ({details})</p>'
+
+
+def status_page(can_build):
     e = html.escape                    # e() makes text safe to put inside HTML
     latest, good = newest_build(), newest_build(good=True)
     good_release = newest_build(good=True, kind="release")
@@ -531,10 +591,12 @@ def status_page():
         banner += (f'<div class="banner failed">Problem: {e(problem)}<span>If P4 asks you to '
                    'log in, run p4 login on the build machine.</span></div>')
     if good:
-        banner += f'<p><a href="/latest">Download the newest good build (change {e(good["change"])})</a></p>'
+        banner += download_link("/latest", "good build", good)
     if good_release and good_release is not good:
-        banner += (f'<p><a href="/latest-release">Download the newest release build '
-                   f'(change {e(good_release["change"])})</a></p>')
+        banner += download_link("/latest-release", "release build", good_release)
+    if good:
+        banner += ('<p><small>Unzip it, then start the game inside. The link always gets the newest '
+                   'good build, so it\'s worth a bookmark.</small></p>')
 
     waiting = []
     for job in list(queue):
@@ -547,7 +609,7 @@ def status_page():
     for b in reversed(history[-KEEP_BUILDS:]):
         files = f'<a href="/builds/{b["number"]}/log.txt">log</a>'
         if b["zip"]:
-            files += f' · <a href="{e(zip_link(b))}">zip</a>'
+            files += f' · <a href="{e(zip_link(b))}">zip</a> {megabytes(b)}'
         took = "…" if b["seconds"] is None else f'{b["seconds"]}s'
         rows += (f'<tr><td>{b["number"]}</td><td>{b["result"]}</td>'
                  f'<td>{b.get("kind", "test")}</td>'
@@ -556,17 +618,24 @@ def status_page():
                  f'<td>{time.strftime("%a %H:%M", time.localtime(b["started"]))}</td>'
                  f'<td>{took}</td><td>{files}</td></tr>')
 
-    token_box = '<input name="token" type="password" placeholder="token"> ' if TOKEN else ""
+    # A browser that opened the team link has the token in a cookie. Anyone else types it.
+    token_box = "" if can_build else '<input name="token" type="password" placeholder="token"> '
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="5">
+<html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>  // reload every 5 seconds, except while someone is typing the token
+setInterval(() => {{ const box = document.querySelector("input[name=token]");
+  if (!box || (!box.value && document.activeElement !== box)) location.reload(); }}, 5000);
+</script>
 <title>{e(NAME)} builds</title><style>{STYLE}</style></head><body>
 <h1>{e(NAME)} builds <small>{e(STREAM)}</small></h1>
 <form method="post" action="/build"><input type="hidden" name="reason" value="button">
 <input type="hidden" name="force" value="1">{token_box}<button>Build now</button>
 <button name="kind" value="release">Release build</button></form>
-<p><small>A release build deletes everything the last build left behind and starts over, so it
-takes longer, and it builds the game the way players get it.</small></p>
+<p><small>{"" if can_build else "Starting a build needs the token. Open the team link once and this "
+"browser remembers it: whoever runs the build machine has the link. "}A release build deletes
+everything the last build left behind and starts over, so it takes longer, and it builds the
+game the way players get it.</small></p>
 {banner}
 <p>{"Waiting: " + ", ".join(waiting) if waiting else ""}</p>
 <table><tr><th>#</th><th>Result</th><th>Kind</th><th>Change</th><th>Who</th><th>What</th><th>Why</th>
@@ -575,10 +644,12 @@ takes longer, and it builds the game the way players get it.</small></p>
 
 
 def main():
+    global token
     # A name or path the console can't show gets escaped instead of crashing.
     sys.stdout.reconfigure(errors="backslashreplace")
     BUILDS_DIR.mkdir(exist_ok=True)
     load_history()
+    token = load_token()
     try:
         check_workspace()
     except RuntimeError as error:
@@ -592,7 +663,10 @@ def main():
     threading.Thread(target=build_forever, daemon=True).start()
     if POLL_SECONDS:
         threading.Thread(target=poll_forever, daemon=True).start()
-    print(f"{NAME} build machine on {PUBLIC_URL} building {STREAM} (Ctrl+C to stop)")
+    print(f"{NAME} build machine on {PUBLIC_URL} building {STREAM} (Ctrl+C to stop)\n"
+          f"Team link, for anyone who should be able to start builds from the page:\n"
+          f"    {PUBLIC_URL}/?token={token}\n"
+          f"Token, for the P4 trigger and P4 Code Review: {token}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

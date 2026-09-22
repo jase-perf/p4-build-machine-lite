@@ -18,7 +18,7 @@ Every build is the same steps, the ones you'd do by hand:
 ## What it doesn't do
 
 - **One computer, one stream, one build at a time.** More requests wait their turn.
-- **No accounts and no permissions.** Anyone who can reach the page can start a build and download what's there, so keep it on a network you trust.
+- **No accounts.** Anyone who can reach the page can see every build and download it, so keep it on a network you trust. Starting a build takes the build machine's token, which it makes for you (see [Who can start builds](#who-can-start-builds)).
 - **No cloud, no Mac builds from a Windows PC.** It builds what the computer it runs on can build.
 - **It doesn't test your game.** It checks that the build finishes, and the example scripts also start the game for a few seconds to catch the kind of break that still "builds fine".
 - **It doesn't stop anyone submitting broken code.** It tells you quickly that someone did.
@@ -51,19 +51,42 @@ The clean-out before a release build is thorough: it deletes everything in the b
 2. **Copy `build_machine.py`** to the computer that will do the builds, into a folder of its own.
 3. **Edit the settings** at the top of `build_machine.py`. At minimum set `NAME` and `STREAM`.
 4. **Check P4 works** in a terminal on that computer: `p4 info`, then `p4 login` if it asks for a password. If your server address starts with `ssl:`, run `p4 trust` first, once. The build machine uses your normal P4 connection and your P4 user. It creates a workspace of its own (one of the free tier's 20) and doesn't need its own user.
-5. **Run it:** `py build_machine.py` on Windows (plain `python` there can be a Microsoft Store shortcut), or `python3 build_machine.py` on macOS and Linux. Allow it through the firewall if asked.
-6. **Open** `http://<that-computer>:8765`. The first build starts within a minute.
+5. **Run it:** `py build_machine.py` on Windows (plain `python` there can be a Microsoft Store shortcut), or `python3 build_machine.py` on macOS and Linux. Allow it through the firewall if asked. It prints something like this:
+   ```
+   MyGame build machine on http://BUILD-PC:8765 building //project/main (Ctrl+C to stop)
+   Team link, for anyone who should be able to start builds from the page:
+       http://BUILD-PC:8765/?token=EXAMPLE-tW4kZ9mQ
+   Token, for the P4 trigger and P4 Code Review: EXAMPLE-tW4kZ9mQ
+   ```
+6. **Open the team link**, and share it with your team. The first build starts within a minute.
 
-That's the whole setup. Everything below is optional.
+That's the whole setup. From here, everything happens on that page: watching builds, starting them, and downloading them. Everything below is optional.
+
+## Who can start builds
+
+Anyone who can reach the page can watch builds and download them. Starting one — with the buttons, a P4 trigger, or a Code Review test — needs the build machine's **token**, a password it makes the first time it runs and keeps in `token.txt` next to `build_machine.py`. It's the same every time the build machine starts.
+
+Open the team link once and that browser remembers the token, so the buttons just work from then on. Someone who opened the plain address instead sees a box for the token next to the buttons. Anyone the team link reaches can start builds, so share it where you'd share the P4 password, not in a public channel.
+
+To use a token of your own choosing, set `TOKEN` in the settings: at least 8 characters, all letters, digits, `-` or `_`, because it goes into links and the trigger line. To change it, delete `token.txt` and restart; anything that used the old one (the trigger, Code Review's test, the link) needs the new one.
+
+## Playing a build
+
+This is the part to send your teammates.
+
+1. Open the build machine's page and click **Download the newest good build**. The link always gets the newest build that passed, so bookmark it. Every passing build in the list below it has its own zip too.
+2. Unzip it: on Windows, right-click the zip and choose **Extract All**. Don't start the game from inside the zip. Unity and Unreal games are more than one file, and the game needs all of them unzipped together.
+3. Start the game: the `.exe` named after it. A Godot test build also has a `.console.exe`, the same game with a window showing its errors, which is handy when you're reporting a bug.
+4. If Windows says it protected your PC, choose **More info**, then **Run anyway**. It says that because the game isn't signed, not because anything is wrong with it.
 
 ## What starts a build
 
 | How | What happens | Needs |
 |---|---|---|
 | By itself | Built in: every 60 s it asks P4 whether anything new was submitted, and builds it | Nothing. Works anywhere, because the build machine only makes outgoing connections |
-| Straight after a submit | A P4 trigger tells the build machine the moment someone submits | Super access to `p4 triggers`, and the P4 server must be able to reach this computer |
-| Every code review | P4 Code Review asks for a build of each review, and shows pass or fail on it | Code Review and this computer must be able to reach each other |
-| By hand | The **Build now** and **Release build** buttons on the page, or `curl -X POST http://HOST:8765/build` | Nothing |
+| Straight after a submit | A P4 trigger tells the build machine the moment someone submits | Super access to `p4 triggers`, the token, and a P4 server that can reach this computer |
+| Every code review | P4 Code Review asks for a build of each review, and shows pass or fail on it | The token, and Code Review and this computer able to reach each other |
+| By hand | The **Build now** and **Release build** buttons on the page | The team link, opened once in that browser, or the token typed into the box |
 
 Asking P4 every minute is enough on its own, and it's what makes this work on any network. The other two start builds sooner, and reviews get an answer without anyone asking.
 
@@ -73,13 +96,13 @@ In the steps below, `BUILD-PC` means this computer's name or address as your P4 
 
 A trigger is a command your P4 server runs when something happens. This one tells the build machine there's a new change, so a build starts in seconds instead of within a minute.
 
-As a P4 super user, run `p4 triggers` and add one line (put your stream and host in, and add `&token=...` if you set `TOKEN`):
+As a P4 super user, run `p4 triggers` and add one line, with your stream, your host, and the token the build machine printed:
 
 ```
-	buildmachine change-commit //project/main/... "curl -s -m 5 -X POST http://BUILD-PC:8765/build?reason=p4-trigger"
+	buildmachine change-commit //project/main/... "curl -s -m 5 -d reason=p4-trigger -d token=YOUR-TOKEN http://BUILD-PC:8765/build"
 ```
 
-Whoever submits sees `Build queued: http://BUILD-PC:8765` right under `Change N submitted.` If the build machine is off, they'll see `'buildmachine' validation failed` instead. Their submit still went in, and the build machine catches up on its own when it's back.
+Whoever submits sees `Build queued: http://BUILD-PC:8765` right under `Change N submitted.` If the build machine is off, they'll see `'buildmachine' validation failed` instead, and with the wrong token, `Wrong or missing token`. Either way their submit still went in, and the build machine catches up on its own.
 
 ### Optional: test every review in P4 Code Review
 
@@ -89,7 +112,7 @@ P4 Code Review can hand each review to the build machine and show the answer on 
 2. **Make sure a Code Review project covers your stream:** a project with a branch whose path is your stream, e.g. `//project/main/...`. In our testing with Code Review 2026.3, a shelf in a stream only became a review once a project covered it.
 3. **Add a test** in Code Review and attach it to a workflow (workflows have to be enabled there to use tests):
    - **URL:** `http://BUILD-PC:8765/build`
-   - **Body** (URL encoded): `change={change}&status={status}&update={update}` (add `&token=...` if you set `TOKEN`)
+   - **Body** (URL encoded): `change={change}&status={status}&update={update}&token=YOUR-TOKEN`
 
 Each review's shelved files are put on top of the newest code and merged with anything submitted to those same files since, the way P4 would do it at submit. If it can't merge cleanly, the test fails with "Resolve and shelve again". After the build, the shelved files are put back straight away, so they don't hold locks your teammates need. The review shows running, then pass or fail, with a link to the log.
 
@@ -147,11 +170,17 @@ Your build script, your `.p4ignore` and your streams all carry over.
 
 ## Security
 
-Anyone who can reach this computer's port can read the status page, the logs and the zips, so run it on a network you trust. Set `TOKEN` to stop strangers starting builds, especially on shared Wi‑Fi like a jam venue's or a coworking space's. Anyone who can submit or shelve can change the build script, and the build machine runs that script: the same trust any CI system places in the people who can commit.
+Anyone who can reach this computer's port can read the status page, the logs and the zips, so run it on a network you trust. On shared Wi‑Fi, like a jam venue's or a coworking space's, that includes the other teams. Only people with the token can start builds, which matters because a release build is expensive: it throws away the engine's cache.
+
+The token travels in plain HTTP, like everything else on the page, so anyone who can watch your network traffic can read it. That's the same trade the rest of the tool makes: it's built for your own network, not the internet.
+
+Browsers send the team link's cookie to every web page on the build machine's computer, whatever its port. The build machine only accepts it from its own page, so another page there can't press the buttons. But any other program serving web pages on that computer receives the cookie too.
+
+Anyone who can submit or shelve can change the build script, and the build machine runs that script: the same trust any CI system places in the people who can commit.
 
 ## Verified with
 
-Windows 11, Python 3.13, Godot 4.7.2, Unity 6000.3 (Personal), and Unreal Engine 5.7 (Blueprint project). Both kinds of build ran through the build machine end to end for Godot and Unity, including a runtime bug that turned the build red and the fix that turned it green. The Godot `build.sh` was run on Ubuntu under WSL.
+Windows 11, Python 3.13, Godot 4.7.2, Unity 6000.3 (Personal), and Unreal Engine 5.7 (Blueprint project). Godot ran through the build machine end to end, both kinds, including a runtime bug that turned the build red, the fix that turned it green, and a bug only a release build shows. Unity's test builds also ran through the build machine; its release build and Unreal's Shipping package were run by hand. The Godot `build.sh` was run on Ubuntu under WSL.
 
 P4 2025.x, and P4 2026.1 with P4 Code Review 2026.3 from [p4-server-docker](https://github.com/jase-perf/p4-server-docker) (SSL, security level 4). Under Docker Desktop, a trigger and a real Code Review test both reached the build machine. A review built green, a broken review failed, and both results showed on the review.
 
