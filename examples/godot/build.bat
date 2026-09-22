@@ -4,7 +4,9 @@ rem The build machine runs it after syncing. You can run it yourself too.
 rem Needs: export_presets.cfg with a "Windows Desktop" preset (submitted), export templates
 rem installed on this computer, and GODOT set to your Godot _console.exe (or godot on PATH).
 if "%GODOT%"=="" set GODOT=godot
-rem %~dp0 is this script's own folder.
+rem %~dp0 is this script's own folder. Work from there, where Godot finds project.godot,
+rem whichever folder you run it from.
+cd /d "%~dp0"
 if "%BUILD_OUTPUT%"=="" set BUILD_OUTPUT=%~dp0build
 rem BUILD_KIND is "test" for an everyday build, "release" for the copy players get.
 if "%BUILD_KIND%"=="" set BUILD_KIND=test

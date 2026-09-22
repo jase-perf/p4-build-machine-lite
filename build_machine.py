@@ -64,7 +64,9 @@ from pathlib import Path
 NAME = "MyGame"                    # shown on the status page and used in zip names
 STREAM = "//project/main"          # the stream to build
 WORKSPACE = "build-machine"        # the build machine's own workspace, created if missing
-BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"  # its path inside the stream
+# Your build script's path inside the stream. If your project is in a folder, include it:
+# "Game/build.bat" for a game in //project/main/Game. The script runs in its own folder.
+BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"
 PORT = 8765
 POLL_SECONDS = 60                  # ask P4 for new changes this often (0 = never)
 TOKEN = ""                         # the password for starting builds: 8+ letters, digits, - or _.
@@ -315,12 +317,31 @@ def run_build(job):
     print(f"Build {number} {build['result']} in {build['seconds']}s: change {change} by {user}")
 
 
+def missing_script(name):
+    """Why the build script wasn't found, and the setting that fixes it. Games often live in a
+    folder of the stream, so look for scripts with that name anywhere in it and suggest one.
+    It only suggests: an Unreal stream with engine source has Build.bat files of its own."""
+    try:
+        found = [os.path.relpath(f["path"], WORKSPACE_DIR).replace(os.sep, "/")
+                 for f in p4_json("have", f"//{WORKSPACE}/.../{name}")]
+    except RuntimeError:
+        found = []
+    missing = f"{STREAM}/{BUILD_SCRIPT} doesn't exist"
+    if len(found) == 1:
+        return f'{missing}, but {found[0]} does. Set BUILD_SCRIPT = "{found[0]}" in the settings.'
+    if found:
+        return (f"{missing}, but these do: {', '.join(found[:5])}. Set BUILD_SCRIPT in the "
+                "settings to the one that builds your game.")
+    return (f"{missing}. Submit your build script, and if it's in a folder, set BUILD_SCRIPT in the "
+            f'settings to its path, e.g. "Game/{name}".')
+
+
 def run_script(output, change, number, kind, log):
     """Run the build script in its own folder. Stop it, and anything it started (like the
     game in a smoke test), if it runs longer than BUILD_TIMEOUT. Returns its exit code."""
     script = WORKSPACE_DIR / BUILD_SCRIPT
     if not script.is_file():
-        raise RuntimeError(f"there's no {BUILD_SCRIPT} in {STREAM}. Submit your build script.")
+        raise RuntimeError(missing_script(script.name))
     command = [str(script)] if os.name == "nt" else ["bash", str(script)]
     env = {**os.environ, "BUILD_OUTPUT": str(output), "BUILD_CHANGE": change,
            "BUILD_NUMBER": str(number), "BUILD_KIND": kind}
@@ -551,7 +572,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, *args):
-        pass                           # the page reloads every 5 seconds; keep the console quiet
+        pass                           # the page checks back every 5 seconds; keep the console quiet
 
 
 STYLE = """
@@ -581,7 +602,8 @@ def status_page(can_build):
     latest, good = newest_build(), newest_build(good=True)
     good_release = newest_build(good=True, kind="release")
     if latest is None:
-        banner = '<div class="banner">No builds yet</div>'
+        label = "No builds yet"
+        banner = f'<div class="banner">{label}</div>'
     else:
         label = {"running": "Building", "passed": "Passing", "failed": "Broken"}.get(
             latest["result"], "Stopped")
@@ -596,7 +618,8 @@ def status_page(can_build):
         banner += download_link("/latest-release", "release build", good_release)
     if good:
         banner += ('<p><small>Unzip it, then start the game inside. The link always gets the newest '
-                   'good build, so it\'s worth a bookmark.</small></p>')
+                   'good build, so it\'s worth a bookmark. Every earlier build that passed has its '
+                   'own Download link in the list below.</small></p>')
 
     waiting = []
     for job in list(queue):
@@ -608,8 +631,8 @@ def status_page(can_build):
     rows = ""
     for b in reversed(history[-KEEP_BUILDS:]):
         files = f'<a href="/builds/{b["number"]}/log.txt">log</a>'
-        if b["zip"]:
-            files += f' · <a href="{e(zip_link(b))}">zip</a> {megabytes(b)}'
+        if b["zip"]:                   # every build that passed can be downloaded, not just the newest
+            files = f'<a href="{e(zip_link(b))}">Download</a> {megabytes(b)} · {files}'
         took = "…" if b["seconds"] is None else f'{b["seconds"]}s'
         rows += (f'<tr><td>{b["number"]}</td><td>{b["result"]}</td>'
                  f'<td>{b.get("kind", "test")}</td>'
@@ -623,11 +646,7 @@ def status_page(can_build):
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script>  // reload every 5 seconds, except while someone is typing the token
-setInterval(() => {{ const box = document.querySelector("input[name=token]");
-  if (!box || (!box.value && document.activeElement !== box)) location.reload(); }}, 5000);
-</script>
-<title>{e(NAME)} builds</title><style>{STYLE}</style></head><body>
+<title>{label} · {e(NAME)} builds</title><style>{STYLE}</style></head><body>
 <h1>{e(NAME)} builds <small>{e(STREAM)}</small></h1>
 <form method="post" action="/build"><input type="hidden" name="reason" value="button">
 <input type="hidden" name="force" value="1">{token_box}<button>Build now</button>
@@ -636,10 +655,28 @@ setInterval(() => {{ const box = document.querySelector("input[name=token]");
 "browser remembers it: whoever runs the build machine has the link. "}A release build deletes
 everything the last build left behind and starts over, so it takes longer, and it builds the
 game the way players get it.</small></p>
-{banner}
+<p id="offline" hidden><b>Can't reach the build machine. Still trying…</b></p>
+<div id="live">{banner}
 <p>{"Waiting: " + ", ".join(waiting) if waiting else ""}</p>
 <table><tr><th>#</th><th>Result</th><th>Kind</th><th>Change</th><th>Who</th><th>What</th><th>Why</th>
-<th>Started</th><th>Took</th><th>Files</th></tr>{rows}</table>
+<th>Started</th><th>Took</th><th>Files</th></tr>{rows}</table></div>
+<script>  // fetch this page again and swap in just the part that changes: the buttons stay put
+async function update() {{
+  try {{
+    const response = await fetch("/");
+    if (!response.ok) throw response.status;
+    const page = new DOMParser().parseFromString(await response.text(), "text/html");
+    document.getElementById("live").replaceWith(page.getElementById("live"));
+    document.title = page.title;
+    document.getElementById("offline").hidden = true;
+  }} catch {{
+    document.getElementById("offline").hidden = false;   // it's stopped, or the network is down
+  }}
+}}
+// Every 5 seconds while someone's looking, and straight away when they come back to the tab.
+setInterval(() => {{ if (!document.hidden) update(); }}, 5000);
+document.addEventListener("visibilitychange", () => {{ if (!document.hidden) update(); }});
+</script>
 </body></html>"""
 
 

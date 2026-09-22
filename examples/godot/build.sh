@@ -4,6 +4,8 @@
 # Needs: export_presets.cfg with a "Linux" preset (submitted), export templates installed
 # on this computer, and GODOT set to your Godot binary (or godot on PATH).
 set -e
+# Work from this script's folder, where Godot finds project.godot, whichever folder you run it from.
+cd "$(dirname "$0")"
 GODOT="${GODOT:-godot}"
 BUILD_OUTPUT="${BUILD_OUTPUT:-$PWD/build}"
 # BUILD_KIND is "test" for an everyday build, "release" for the copy players get.

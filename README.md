@@ -49,7 +49,7 @@ The clean-out before a release build is thorough: it deletes everything in the b
 
 1. **Put a build script in your project** and submit it. Copy the contents of one of the example folders — [Godot](examples/godot), [Unity](examples/unity), [Unreal](examples/unreal) — into the folder that holds your project file (`project.godot`, `Assets/`, or `*.uproject`), keeping the layout they're in. **Submit the `.p4ignore` too**, if your project doesn't have one yet: the build machine reads it from its own copy of your project, so one that only exists on your PC does nothing for it.
 2. **Copy `build_machine.py`** to the computer that will do the builds, into a folder of its own.
-3. **Edit the settings** at the top of `build_machine.py`. At minimum set `NAME` and `STREAM`.
+3. **Edit the settings** at the top of `build_machine.py`. At minimum set `NAME` and `STREAM`. If your project is in a folder of the stream rather than at the top, which is common, also set `BUILD_SCRIPT` to the script's path inside the stream: `"Game/build.bat"` for a project in `//project/main/Game`. The script always runs in its own folder, so the example scripts work there unchanged. If you forget, the first build fails and its log names the setting to use.
 4. **Check P4 works** in a terminal on that computer: `p4 info`, then `p4 login` if it asks for a password. If your server address starts with `ssl:`, run `p4 trust` first, once. The build machine uses your normal P4 connection and your P4 user. It creates a workspace of its own (one of the free tier's 20) and doesn't need its own user.
 5. **Run it:** `py build_machine.py` on Windows (plain `python` there can be a Microsoft Store shortcut), or `python3 build_machine.py` on macOS and Linux. Allow it through the firewall if asked. It prints something like this:
    ```
@@ -74,7 +74,7 @@ To use a token of your own choosing, set `TOKEN` in the settings: at least 8 cha
 
 This is the part to send your teammates.
 
-1. Open the build machine's page and click **Download the newest good build**. The link always gets the newest build that passed, so bookmark it. Every passing build in the list below it has its own zip too.
+1. Open the build machine's page and click **Download the newest good build**. The link always gets the newest build that passed, so bookmark it. Every earlier build that passed has its own **Download** link in the list below, so if the newest one has a problem just before a demo, the one before it is a click away.
 2. Unzip it: on Windows, right-click the zip and choose **Extract All**. Don't start the game from inside the zip. Unity and Unreal games are more than one file, and the game needs all of them unzipped together.
 3. Start the game: the `.exe` named after it. A Godot test build also has a `.console.exe`, the same game with a window showing its errors, which is handy when you're reporting a bug.
 4. If Windows says it protected your PC, choose **More info**, then **Run anyway**. It says that because the game isn't signed, not because anything is wrong with it.

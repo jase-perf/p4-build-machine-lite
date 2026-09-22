@@ -1,4 +1,6 @@
 *.sh text eol=lf
-*.bat text eol=crlf
+# Batch files are stored with Windows line endings, not just checked out with them, so a
+# build.bat downloaded on its own from GitHub still works: cmd.exe misreads Unix endings.
+*.bat -text
 *.py text eol=lf
 *.cs text
