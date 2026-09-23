@@ -2,7 +2,11 @@
 
 Turns a spare computer into your team's build machine. When someone submits to P4, it builds the game and puts it on a web page your team can download from.
 
-For indie teams, solo devs and game jams that don't need Jenkins, TeamCity or Horde. It's one Python file.
+For indie teams, solo devs and game jams that don't need Jenkins, TeamCity or Horde but want automated builds. It's one exe or python file.
+
+## Note
+
+This is just released and has had minimal testing so far. I plan to record some tutorial videos soon but leave your comments and questions in Issues and I will try to get to them as soon as I can.
 
 ## Setup
 
@@ -11,7 +15,7 @@ You need a computer that can build your game, with the p4 command line (P4 CLI, 
 1. **Add the build scripts to your project.** Copy everything in an example folder into your project's top folder (the one with `project.godot`, `Assets` or the `.uproject`), and submit it: [Godot](examples/godot) · [Unity](examples/unity) · [Unreal](examples/unreal). Keep both `build.bat` (Windows) and `build.sh` (macOS, Linux), so a build machine on either can build it.
 2. **Get the build machine** for [Windows, macOS or Linux](../../releases/latest) and unzip it. The Mac one is for Apple silicon. (Or, with Python 3.9+, use `build_machine.py` from this repo.)
 3. **Start it** on the build computer: double-click `build-machine` (on Linux, run `./build-machine`), or run `py build_machine.py` (Windows) or `python3 build_machine.py` (macOS, Linux). It isn't signed, so the first time, Windows may say it protected your PC (click **More info**, then **Run anyway**), and macOS may refuse to open it (click **Open Anyway** in System Settings › Privacy & Security). If Windows asks, allow it through the firewall, for private and public networks, so teammates can reach it.
-4. **Fill in `build-machine.ini`**, which the first run creates and, on Windows and macOS, opens. Set `stream`, and `project_folder` if your project is in a folder of the stream. If the p4 command isn't set up for your server, set `server` and `user` too. Then start it again: it reads the file only when it starts.
+4. At first it will stop after creating an ini file for you. **Fill in `build-machine.ini`**, which the first run creates and, on Windows and macOS, opens. Set `stream`, and `project_folder` if your project is in a folder of the stream. If the p4 command isn't set up for your server, set `server` and `user` too. Then start it again: it reads the file only when it starts.
 5. **Open the team link it shows**, and share it only with your team: anyone with it can start builds.
 
 If P4 needs you to trust the server or log in, the build machine asks in its window. The first build starts within a minute.
