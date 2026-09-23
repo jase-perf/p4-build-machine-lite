@@ -83,24 +83,15 @@ project_folder =
 # keep_builds = 20
 # build_timeout_minutes = 30
 """
-STREAM = ""
-PROJECT_FOLDER = ""
-SERVER = ""
-USER = ""
-NAME = ""
-PORT = 8765
-PUBLIC_URL = ""
-POLL_SECONDS = 60
-TOKEN = ""
-CODE_REVIEW_URL = ""
-WEBHOOK_URL = ""
-WORKSPACE = "build-machine"
-KEEP_BUILDS = 20
-BUILD_TIMEOUT = 30 * 60            # seconds
+# These come from build-machine.ini: load_settings() fills them all in, defaults included,
+# so there's one place to look for what a setting does and what it falls back to.
+STREAM = PROJECT_FOLDER = SERVER = USER = NAME = PUBLIC_URL = ""
+CODE_REVIEW_URL = WEBHOOK_URL = WORKSPACE = COOKIE = ""
+PORT = POLL_SECONDS = KEEP_BUILDS = BUILD_TIMEOUT = 0
+SCRIPT_ENV = {}                    # settings in capitals, for the build script
+
 MAX_WAITING = 10                   # build requests that can wait at once
 BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"
-COOKIE = "build_machine_8765"      # named by port, so two build machines on one PC don't clash
-SCRIPT_ENV = {}                    # settings in capitals, for the build script
 
 # A PyInstaller .exe runs from a temporary folder, so its own files go next to the .exe.
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
@@ -109,9 +100,10 @@ WORKSPACE_DIR = HERE / "workspace"
 BUILDS_DIR = HERE / "builds"
 TOKEN_FILE = HERE / "token.txt"
 
-token = ""                         # TOKEN, or the one in token.txt (see load_token)
+token = ""                         # the password for starting builds (see load_token)
 history = []                       # every build started, oldest first (saved in builds/history.json)
 queue = []                         # build requests waiting their turn, oldest first
+starting = None                    # the request being set up, before it reaches history
 problem = ""                       # the last error, shown on the status page
 # Guards the queue. The builder waits on it, and wakes up when a build is requested.
 new_request = threading.Condition()
@@ -135,7 +127,7 @@ def stop(message):
 
 def load_settings():
     """Read build-machine.ini into the settings above. The first time, write one to fill in."""
-    global STREAM, PROJECT_FOLDER, SERVER, USER, NAME, PORT, PUBLIC_URL, POLL_SECONDS, TOKEN
+    global STREAM, PROJECT_FOLDER, SERVER, USER, NAME, PORT, PUBLIC_URL, POLL_SECONDS, token
     global CODE_REVIEW_URL, WEBHOOK_URL, WORKSPACE, KEEP_BUILDS, BUILD_TIMEOUT, COOKIE, SCRIPT_ENV
     file = SETTINGS_FILE.name
     if not SETTINGS_FILE.exists():
@@ -204,7 +196,7 @@ def load_settings():
     PORT = number("port", 8765, 1, 65535)
     PUBLIC_URL = (values.get("public_url") or f"http://{socket.gethostname()}:{PORT}").rstrip("/")
     POLL_SECONDS = number("poll_seconds", 60, 0)
-    TOKEN = values.get("token", "")
+    token = values.get("token", "")    # load_token() makes one if this is empty
     CODE_REVIEW_URL = values.get("code_review_url", "")
     WEBHOOK_URL = values.get("discord_webhook", "")
     # Named after this computer, so build machines on Windows and a Mac can share a server.
@@ -378,11 +370,14 @@ def request_build(reason, shelf=None, review_url=None, force=False, kind="test")
 
 
 def build_forever():
+    global starting
     while True:
         with new_request:
             while not queue:
                 new_request.wait()     # sleep until a build is requested
-            job = queue.pop(0)
+            # Also kept in starting, so the page keeps saying something is happening while the
+            # build is set up: it takes a few seconds before it has a number to show.
+            starting = job = queue.pop(0)
         try:
             run_build(job)
             set_problem("")
@@ -390,6 +385,8 @@ def build_forever():
             set_problem(error)
             for url in job["review_urls"]:
                 post_json(url, {"status": "fail", "messages": [f"Build machine problem: {error}"]})
+        finally:
+            starting = None
 
 
 def poll_forever():
@@ -415,6 +412,7 @@ def set_problem(error):
 # One build: get the code, run the script, keep the results.
 # ---------------------------------------------------------------------------
 def run_build(job):
+    global starting
     shelved = job["shelf"] is not None
     release = job["kind"] == "release"
     change = job["shelf"] if shelved else newest_change()
@@ -434,6 +432,7 @@ def run_build(job):
              "reason": job["reason"], "result": "running", "started": time.time(),
              "seconds": None, "zip": None}
     history.append(build)
+    starting = None                    # the page shows it from history now, not as "Starting"
     save_history()
     notify(build, job["review_urls"])
 
@@ -467,9 +466,9 @@ def run_build(job):
                 except RuntimeError as error:
                     say(f"ERROR: {error}")
 
-    build["result"] = "passed" if passed else "failed"
     build["seconds"] = round(time.time() - build["started"])
-    save_history()
+    build["result"] = "passed" if passed else "failed"   # last, so the page never sees a
+    save_history()                                       # finished build with no time on it
     delete_old_builds()
     notify(build, job["review_urls"])
     print(f"Build {number} {build['result']} in {build['seconds']}s: change {change} by {user}")
@@ -542,6 +541,11 @@ def run_script(output, change, number, kind, log):
             os.killpg(process.pid, signal.SIGKILL)
         log.write(f"== Stopped: took longer than {BUILD_TIMEOUT} seconds\n".encode())
         return -1
+
+
+def running_build():
+    """The build happening right now, of anything: a change, a shelf, test or release."""
+    return next((b for b in reversed(history) if b["result"] == "running"), None)
 
 
 def newest_build(good=False, kind=None):
@@ -630,16 +634,16 @@ def is_code_review_url(url):
 # the token: in the request, or in the cookie the team link leaves behind.
 # ---------------------------------------------------------------------------
 def load_token():
-    """TOKEN if you set one. Otherwise the one in token.txt, made the first time."""
-    if not TOKEN and (not TOKEN_FILE.exists() or not TOKEN_FILE.read_text("utf-8-sig").strip()):
+    """Use the token from build-machine.ini, or the one in token.txt, made here the first time."""
+    global token
+    if not token and (not TOKEN_FILE.exists() or not TOKEN_FILE.read_text("utf-8-sig").strip()):
         # 0o600: on macOS and Linux, only your own account can read it.
         with os.fdopen(os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             f.write(secrets.token_urlsafe(12) + "\n")
-    value = TOKEN or TOKEN_FILE.read_text("utf-8-sig").strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]{8,}", value):  # it goes into URLs, a cookie and a trigger line
+    token = token or TOKEN_FILE.read_text("utf-8-sig").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,}", token):  # it goes into URLs, a cookie and a trigger line
         stop("The token must be at least 8 letters, digits, - or _. Change token in "
              f"{SETTINGS_FILE.name}, or delete token.txt to get a new one.")
-    return value
 
 
 def token_matches(given):
@@ -759,14 +763,92 @@ class Handler(BaseHTTPRequestHandler):
 
 
 STYLE = """
-body { font: 16px system-ui, sans-serif; margin: 2rem auto; max-width: 70rem; padding: 0 1rem; }
-.banner { font-size: 1.8rem; font-weight: 700; padding: 1rem 1.25rem; border-radius: 10px;
-          color: #fff; background: #57606a; margin: 1rem 0; }
-.banner span { display: block; font-size: 1rem; font-weight: 400; }
-.passed { background: #1a7f37; } .failed { background: #cf222e; } .running { background: #9a6700; }
-table { border-collapse: collapse; width: 100%; }
-td, th { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #d0d7de; }
+:root { color-scheme: light dark;
+  --bg: #fff; --card: #f6f8fa; --text: #1f2328; --dim: #59636e; --line: #d1d9e0; --blue: #0969da;
+  --green: #1a7f37; --green-bg: #dafbe1; --red: #cf222e; --red-bg: #ffebe9;
+  --amber: #9a6700; --amber-bg: #fff8c5; --grey: #59636e; --grey-bg: #eaeef2; }
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0d1117; --card: #151b23; --text: #e6edf3; --dim: #9198a1; --line: #3d444d; --blue: #4493f8;
+  --green: #3fb950; --green-bg: #122119; --red: #f85149; --red-bg: #2b1618;
+  --amber: #d29922; --amber-bg: #2b2413; --grey: #9198a1; --grey-bg: #21262d; } }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--text);
+       background: var(--bg); margin: 0 auto; max-width: 76rem; padding: 1.5rem 1rem 3rem; }
+h1 { font-size: 1.35rem; margin: 0 0 1rem; }
+h1 small { font: 400 .8rem ui-monospace, Consolas, monospace; color: var(--dim); }
+a { color: var(--blue); }
+.row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 1rem 0; }
+.note { color: var(--dim); font-size: .85rem; margin: .7rem 0 0; }
+.dim { color: var(--dim); }
+.spacer { flex: 1; }
+
+/* buttons, and the box for the token */
+.btn { display: inline-flex; align-items: center; font: inherit; font-weight: 600;
+       padding: .5rem .9rem; border: 1px solid var(--line); border-radius: 8px;
+       background: var(--card); color: var(--text); text-decoration: none; cursor: pointer; }
+.btn:hover { border-color: var(--dim); }
+.btn:active { transform: translateY(1px); }
+.btn.go { background: var(--blue); border-color: var(--blue); color: #fff; }
+.btn.small { padding: .2rem .55rem; font-size: .85rem; font-weight: 500; }
+input { font: inherit; padding: .5rem .7rem; border: 1px solid var(--line); border-radius: 8px;
+        background: var(--bg); color: var(--text); }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* pass, fail and building badges */
+.chip { display: inline-flex; align-items: center; gap: .35rem; white-space: nowrap;
+        font-size: .8rem; font-weight: 600; padding: .2rem .6rem; border-radius: 999px;
+        color: var(--grey); background: var(--grey-bg); }
+.chip.passed { color: var(--green); background: var(--green-bg); }
+.chip.failed { color: var(--red); background: var(--red-bg); }
+.chip.running, .chip.queued { color: var(--amber); background: var(--amber-bg); }
+.queued .chip { white-space: normal; }   /* a long one wraps instead of widening the page */
+.dot { width: .5rem; height: .5rem; border-radius: 50%; background: currentColor; }
+.chip.running .dot { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .2; } }
+@media (prefers-reduced-motion: reduce) { .chip.running .dot { animation: none; } }
+
+/* the panel saying how things stand */
+.banner { display: flex; flex-wrap: wrap; gap: .5rem .75rem; align-items: center;
+          border: 1px solid var(--line); border-left: 6px solid var(--grey); border-radius: 10px;
+          background: var(--card); padding: .9rem 1.1rem; margin: 1rem 0; }
+.banner.passed { border-left-color: var(--green); }
+.banner.failed { border-left-color: var(--red); }
+.banner.running { border-left-color: var(--amber); }
+.banner .headline { font-size: 1.15rem; font-weight: 600; }
+.banner .chip { font-size: 1.05rem; padding: .3rem .8rem; }
+.banner .chip .dot { width: .6rem; height: .6rem; }
+.banner .desc { flex-basis: 100%; margin: 0; color: var(--dim); font-size: .9rem;
+                word-break: break-word; overflow-wrap: anywhere; }
+
+/* the list of builds: it scrolls sideways on a phone instead of squashing */
+.builds { border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+th { text-align: left; white-space: nowrap; padding: .55rem .7rem; background: var(--card);
+     color: var(--dim); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; }
+td { padding: .5rem .7rem; border-top: 1px solid var(--line); }
+tbody tr:hover td { background: var(--card); }
+td.what { min-width: 13rem; }
+.num { font-variant-numeric: tabular-nums; }
 """
+# Words for the coloured badges, and for the panel and the browser tab.
+CHIP_WORDS = {"running": "Building", "passed": "Passed", "failed": "Failed", "stopped": "Stopped"}
+STATE_WORDS = {"running": "Building", "passed": "Passing", "failed": "Broken", "stopped": "Stopped"}
+
+
+def chip(state, text=""):
+    """A badge: green for passed, red for failed, amber with a dot for work happening now."""
+    dot = '<span class="dot"></span>' if state in ("running", "queued") else ""
+    return f'<span class="chip {state}">{dot}{text or CHIP_WORDS.get(state, state)}</span>'
+
+
+def took(build):
+    """How long a build took. One still running counts up in the browser every second;
+    one the build machine was stopped in the middle of never got a time, so it shows nothing."""
+    if build["result"] != "running":
+        return f'{build["seconds"]}s' if build["seconds"] is not None else ""
+    seconds = round(time.time() - build["started"])
+    return f'<span class="tick" data-seconds="{seconds}">{seconds}s</span>'
 
 
 def megabytes(build):
@@ -775,83 +857,130 @@ def megabytes(build):
     return f'{build["zip_bytes"] / 1e6:.1f} MB' if build.get("zip_bytes") else ""
 
 
-def download_link(url, what, build):
+def download_button(url, what, build, main=False):
     details = ", ".join(filter(None, [f'change {html.escape(build["change"])}', megabytes(build)]))
-    return f'<p><a href="{url}">Download the newest {what}</a> ({details})</p>'
+    return (f'<a class="btn{" go" if main else ""}" href="{url}">{what}</a>'
+            f'<span class="dim">{details}</span>')
+
+
+def job_words(job):
+    """What a waiting request will build, e.g. "release build of shelf 41 (Code Review)"."""
+    what = f'shelf {html.escape(job["shelf"])}' if job["shelf"] else "the newest change"
+    if job["kind"] == "release":
+        what = f"release build of {what}"
+    return f'{what} ({html.escape(job["reason"])})'
+
+
+def build_banner(build):
+    """The panel at the top: the build running now, or how the last one went."""
+    e = html.escape
+    kind = "Release build" if build.get("kind") == "release" else "Build"
+    what = "shelf" if build["shelved"] else "change"
+    details = [f'{kind} {build["number"]}', f'{what} {e(build["change"])}',
+               f'by {e(build["user"])}', took(build)]
+    return (f'<div class="banner {build["result"]}">{chip(build["result"])}'
+            f'<span class="dim">{" · ".join(filter(None, details))}</span>'
+            f'<span class="spacer"></span>'
+            f'<a class="btn small" href="/builds/{build["number"]}/log.txt">Log</a>'
+            f'<p class="desc">{e(build["desc"])}</p></div>')
 
 
 def status_page(can_build):
     e = html.escape                    # e() makes text safe to put inside HTML
-    latest, good = newest_build(), newest_build(good=True)
-    good_release = newest_build(good=True, kind="release")
-    if latest is None:
-        label = "No builds yet"
-        banner = f'<div class="banner">{label}</div>'
-    else:
-        label = {"running": "Building", "passed": "Passing", "failed": "Broken"}.get(
-            latest["result"], "Stopped")
-        banner = (f'<div class="banner {latest["result"]}">{label}: change {e(latest["change"])} '
-                  f'by {e(latest["user"])}<span>{e(latest["desc"])}</span></div>')
-    if problem:
-        banner += (f'<div class="banner failed">Problem: {e(problem)}<span>If P4 wants a password, '
-                   'restart the build machine and type it there.</span></div>')
-    if good:
-        banner += download_link("/latest", "good build", good)
-    if good_release and good_release is not good:
-        banner += download_link("/latest-release", "release build", good_release)
-    if good:
-        banner += '<p><small>Unzip it, then run the game. Earlier builds are below.</small></p>'
+    # The panel says what's happening now. When nothing is, it says how the newest submitted
+    # change did, which is what "is the game working?" means.
+    active, pending = running_build(), starting
+    good, good_release = newest_build(good=True), newest_build(good=True, kind="release")
 
-    waiting = []
-    for job in list(queue):
-        what = f"shelf {job['shelf']}" if job["shelf"] else "newest change"
-        if job["kind"] == "release":
-            what = f"release build of {what}"
-        waiting.append(f"{what} ({e(job['reason'])})")
+    if active:
+        active = dict(active)          # a copy, so a build finishing mid-page can't leave the
+        label = STATE_WORDS.get(active["result"], "Stopped")   # tab title and the panel disagreeing
+        banner = build_banner(active)
+    elif pending:                      # off the queue, not yet far enough along to have a number
+        label = "Starting"
+        banner = (f'<div class="banner running">{chip("running", "Starting")}'
+                  f'<span class="dim">{job_words(pending)}</span></div>')
+    elif latest := newest_build():
+        label, banner = STATE_WORDS.get(latest["result"], "Stopped"), build_banner(latest)
+    else:
+        label, banner = "No builds yet", '<div class="banner">No builds yet</div>'
+    if problem:
+        banner += ('<div class="banner failed"><span class="headline">Problem</span>'
+                   f'<span class="dim">{e(problem)}</span><p class="desc">If P4 wants a password, '
+                   'restart the build machine and type it there.</p></div>')
+
+    downloads = ""
+    if good:
+        downloads = download_button("/latest", "Download the newest build", good, main=True)
+    if good_release and good_release is not good:
+        downloads += download_button("/latest-release", "Download the release build", good_release)
+    if downloads:
+        downloads = (f'<div class="row">{downloads}</div><p class="note">Unzip it, then run the '
+                     'game. Every build below that passed can be downloaded too.</p>')
+
+    # Whatever is waiting its turn. The one being built is in the panel above, not here.
+    waiting = [chip("queued", job_words(job)) for job in list(queue)]
+    queued = f'<div class="row dim queued">Queued: {"".join(waiting)}</div>' if waiting else ""
 
     rows = ""
     for b in reversed(history[-KEEP_BUILDS:]):
-        files = f'<a href="/builds/{b["number"]}/log.txt">log</a>'
+        files = f'<a href="/builds/{b["number"]}/log.txt">Log</a>'
         if b["zip"]:                   # every build that passed can be downloaded, not just the newest
-            files = f'<a href="{e(zip_link(b))}">Download</a> {megabytes(b)} · {files}'
-        took = "…" if b["seconds"] is None else f'{b["seconds"]}s'
-        rows += (f'<tr><td>{b["number"]}</td><td>{b["result"]}</td>'
-                 f'<td>{b.get("kind", "test")}</td>'
-                 f'<td>{"shelf " if b["shelved"] else ""}{e(b["change"])}</td><td>{e(b["user"])}</td>'
-                 f'<td>{e(b["desc"])}</td><td>{e(b["reason"])}</td>'
-                 f'<td>{time.strftime("%a %H:%M", time.localtime(b["started"]))}</td>'
-                 f'<td>{took}</td><td>{files}</td></tr>')
+            files = (f'<a class="btn small" href="{e(zip_link(b))}">Download</a> '
+                     f'<span class="dim">{megabytes(b)}</span> · {files}')
+        rows += (f'<tr><td class="num dim">{b["number"]}</td><td>{chip(b["result"])}</td>'
+                 f'<td class="dim">{b.get("kind", "test")}</td>'
+                 f'<td class="num">{"shelf " if b["shelved"] else ""}{e(b["change"])}</td>'
+                 f'<td>{e(b["user"])}</td><td class="what">{e(b["desc"])}</td>'
+                 f'<td class="dim">{e(b["reason"])}</td>'
+                 f'<td class="dim">{time.strftime("%a %H:%M", time.localtime(b["started"]))}</td>'
+                 f'<td class="num">{took(b)}</td><td>{files}</td></tr>')
 
     # A browser that opened the team link has the token in a cookie. Anyone else types it.
-    token_box = "" if can_build else '<input name="token" type="password" placeholder="token"> '
+    token_box = "" if can_build else '<input name="token" type="password" placeholder="token">'
+    hint = "" if can_build else "To start builds, open the team link from whoever runs the build machine. "
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{label} · {e(NAME)} builds</title><style>{STYLE}</style></head><body>
 <h1>{e(NAME)} builds <small>{e(STREAM)}</small></h1>
-<form method="post" action="/build"><input type="hidden" name="reason" value="button">
-<input type="hidden" name="force" value="1">{token_box}<button>Build now</button>
-<button name="kind" value="release">Release build</button></form>
-<p><small>{"" if can_build else "To start builds, open the team link from whoever runs the build machine. "}Release builds start
-from scratch and make the version players get. They're slower.</small></p>
-<p id="offline" hidden><b>Can't reach the build machine. Still trying…</b></p>
-<div id="live">{banner}
-<p>{"Waiting: " + ", ".join(waiting) if waiting else ""}</p>
-<table><tr><th>#</th><th>Result</th><th>Kind</th><th>Change</th><th>Who</th><th>What</th><th>Why</th>
-<th>Started</th><th>Took</th><th>Files</th></tr>{rows}</table></div>
+<form class="row" method="post" action="/build">
+<input type="hidden" name="reason" value="button"><input type="hidden" name="force" value="1">
+{token_box}<button class="btn go">Build now</button>
+<button class="btn" name="kind" value="release">Release build</button></form>
+<p class="note">{hint}Release builds start from scratch and make the version players get.
+They're slower.</p>
+<p id="offline" class="banner failed" hidden><b>Can't reach the build machine. Still trying…</b></p>
+<div id="live">{banner}{downloads}{queued}
+<div class="builds"><table>
+<thead><tr><th>#</th><th>Result</th><th>Kind</th><th>Change</th><th>Who</th><th>What</th>
+<th>Why</th><th>Started</th><th>Took</th><th>Files</th></tr></thead>
+<tbody>{rows}</tbody></table></div></div>
 <script>  // fetch this page again and swap in just the part that changes: the buttons stay put
+let swapped = Date.now();            // when that part last changed, for the counter below
+
+function tick() {{                     // a running build's seconds, counted up between updates
+  const since = Math.round((Date.now() - swapped) / 1000);
+  for (const span of document.querySelectorAll(".tick"))
+    span.textContent = Number(span.dataset.seconds) + since + "s";
+}}
+
 async function update() {{
   try {{
     const response = await fetch("/");
     if (!response.ok) throw response.status;
     const page = new DOMParser().parseFromString(await response.text(), "text/html");
-    document.getElementById("live").replaceWith(page.getElementById("live"));
+    const live = page.getElementById("live");
+    if (!live) throw "not the build machine";   // something else answered, e.g. a wifi login page
+    document.getElementById("live").replaceWith(live);
     document.title = page.title;
+    swapped = Date.now();
     document.getElementById("offline").hidden = true;
   }} catch {{
     document.getElementById("offline").hidden = false;   // it's stopped, or the network is down
   }}
 }}
+setInterval(tick, 1000);
 // Every 5 seconds while someone's looking, and straight away when they come back to the tab.
 setInterval(() => {{ if (!document.hidden) update(); }}, 5000);
 document.addEventListener("visibilitychange", () => {{ if (!document.hidden) update(); }});
@@ -860,7 +989,6 @@ document.addEventListener("visibilitychange", () => {{ if (!document.hidden) upd
 
 
 def main():
-    global token
     if getattr(sys, "frozen", False):  # a PyInstaller program points what it starts at its own
         if os.name == "nt":            # libraries: undo that for p4, the engines and the script
             ctypes.windll.kernel32.SetDllDirectoryW(None)
@@ -875,7 +1003,7 @@ def main():
     connect()
     BUILDS_DIR.mkdir(exist_ok=True)
     load_history()
-    token = load_token()
+    load_token()
     try:
         check_workspace()
     except RuntimeError as error:

@@ -22,6 +22,7 @@ If P4 needs you to trust the server or log in, the build machine asks in its win
 
 ## Using it
 
+- **The panel at the top** says what's happening: building now, passing or broken. It keeps itself up to date, so leave the page open.
 - **Builds start by themselves** within a minute of each submit.
 - **Build now** builds the newest change straight away.
 - **Release build** starts from scratch and makes the version players get. It's slower.
