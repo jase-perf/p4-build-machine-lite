@@ -10,6 +10,14 @@ rem Work in this script's folder (%~dp0), wherever it's run from.
 cd /d "%~dp0"
 if not exist "%BUILD_OUTPUT%" mkdir "%BUILD_OUTPUT%"
 
+rem The two things that are usually missing. Without these checks, cmd says only
+rem "'"godot"' is not recognized", and Godot buries its own reason in pages of output.
+set GODOT_FOUND=
+if exist "%GODOT%" set GODOT_FOUND=1
+where "%GODOT%" > nul 2>&1 && set GODOT_FOUND=1
+if not defined GODOT_FOUND echo Can't find Godot: %GODOT%. Set GODOT in build-machine.ini to your Godot _console.exe, or put godot on the PATH. & exit /b 1
+if not exist export_presets.cfg echo This project has no export_presets.cfg next to project.godot. In Godot: Project menu, Export, add a "Windows Desktop" preset, then submit the file. & exit /b 1
+
 rem 1. Export a debug build. Only debug builds print script errors.
 "%GODOT%" --headless --export-debug "Windows Desktop" "%BUILD_OUTPUT%\MyGame.exe" || exit /b 1
 

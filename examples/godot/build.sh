@@ -13,6 +13,12 @@ SMOKE="$(mktemp)"
 trap 'rm -f "$SMOKE"' EXIT
 mkdir -p "$BUILD_OUTPUT"
 if [ "$(uname)" = Darwin ]; then PRESET="macOS" GAME="MyGame.app"; else PRESET="Linux" GAME="MyGame.x86_64"; fi
+# Godot buries its reason for this in pages of output, so say it here.
+if [ ! -f export_presets.cfg ]; then
+    echo "This project has no export_presets.cfg next to project.godot."
+    echo "In Godot: Project menu, Export, add a \"$PRESET\" preset, then submit the file."
+    exit 1
+fi
 
 run_game() {                        # a macOS app is a folder: its program's name is in Info.plist
     local program="$BUILD_OUTPUT/$GAME"

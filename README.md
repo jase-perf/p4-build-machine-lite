@@ -4,6 +4,8 @@ Turns a spare computer into your team's build machine. When someone submits to P
 
 For indie teams, solo devs and game jams that don't need Jenkins, TeamCity or Horde but want automated builds. It's one exe or python file.
 
+![The build machine's page: a green Passed panel for the newest change, buttons to download the newest build and the newest release build, and a table of recent builds with their result, who submitted and how long each took](images/Dashboard.png)
+
 ## Note
 
 This is just released and has had minimal testing so far. I plan to record some tutorial videos soon but leave your comments and questions in Issues and I will try to get to them as soon as I can.
@@ -94,6 +96,8 @@ Don't run Docker Desktop and Podman at the same time.
 ### Discord
 
 Set `discord_webhook` in `build-machine.ini` to post each pass or fail to a channel.
+
+![A Discord channel where each build posts one line: a red cross for the failed ones and a green tick for the passes, each naming the change, who submitted it, the description and a link to the page](images/Discord_Updates.png)
 
 ## Good to know
 
