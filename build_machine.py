@@ -661,7 +661,9 @@ class Handler(BaseHTTPRequestHandler):
             query = dict(urllib.parse.parse_qsl(url.query))
             if "token" in query and self.has_token(query):
                 return self.redirect("/", remember_token=True)  # the team link: remember it, tidy the URL
-            self.send(200, status_page(can_build=self.has_token({})), "text/html; charset=utf-8")
+            if query.get("lang") in LANGUAGES:
+                return self.redirect("/", language=query["lang"])  # a language link: remember it too
+            self.send(200, status_page(self.has_token({}), self.language()), "text/html; charset=utf-8")
         elif path in ("/latest", "/latest-release"):
             kind = "release" if path == "/latest-release" else None
             good = newest_build(good=True, kind=kind)
@@ -712,8 +714,20 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and origin.lower() != "http://" + self.headers.get("Host", "").lower():
             return False
+        return any(token_matches(value) for value in self.cookies(COOKIE))
+
+    def cookies(self, name):
+        """The values the browser sent for a cookie. Usually one, or none."""
         cookies = (part.strip().partition("=") for part in self.headers.get("Cookie", "").split(";"))
-        return any(name == COOKIE and token_matches(value) for name, _, value in cookies)
+        return [value for key, _, value in cookies if key == name]
+
+    def language(self):
+        """The page's language: the one picked with the links on the page, or else the browser's."""
+        for choice in [*self.cookies(LANGUAGE_COOKIE), *self.headers.get("Accept-Language", "").split(",")]:
+            code = choice.strip()[:2].lower()      # ja-JP and zh-CN: ja and zh
+            if code in LANGUAGES:
+                return code
+        return "en"
 
     def read_params(self):
         """Parameters from the URL (?a=1&b=2) and from a form-style body, merged."""
@@ -749,13 +763,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def redirect(self, location, remember_token=False):
+    def redirect(self, location, remember_token=False, language=None):
         self.send_response(303)
         self.send_header("Location", location)
         if remember_token:             # a cookie, so this browser can press the buttons from now on
             # HttpOnly: scripts can't read it. SameSite=Lax: forms on other websites don't send it.
             self.send_header("Set-Cookie", f"{COOKIE}={token}; Path=/; Max-Age={365 * 24 * 3600}; "
                                            "HttpOnly; SameSite=Lax")
+        if language:
+            self.send_header("Set-Cookie", f"{LANGUAGE_COOKIE}={language}; Path=/; "
+                                           f"Max-Age={365 * 24 * 3600}; SameSite=Lax")
         self.end_headers()
 
     def log_message(self, *args):
@@ -777,6 +794,8 @@ body { font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: v
        background: var(--bg); margin: 0 auto; max-width: 76rem; padding: 1.5rem 1rem 3rem; }
 h1 { font-size: 1.35rem; margin: 0 0 1rem; }
 h1 small { font: 400 .8rem ui-monospace, Consolas, monospace; color: var(--dim); }
+header h1 { margin: 0; }
+nav { color: var(--dim); font-size: .85rem; }
 a { color: var(--blue); }
 .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 1rem 0; }
 .note { color: var(--dim); font-size: .85rem; margin: .7rem 0 0; }
@@ -828,27 +847,147 @@ th { text-align: left; white-space: nowrap; padding: .55rem .7rem; background: v
      color: var(--dim); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; }
 td { padding: .5rem .7rem; border-top: 1px solid var(--line); }
 tbody tr:hover td { background: var(--card); }
-td.what { min-width: 13rem; }
+td { word-break: keep-all; }        /* Japanese and Chinese break anywhere: keep short cells whole */
+td.what { min-width: 13rem; word-break: normal; }
 .num { font-variant-numeric: tabular-nums; }
 """
 # Words for the coloured badges, and for the panel and the browser tab.
 CHIP_WORDS = {"running": "Building", "passed": "Passed", "failed": "Failed", "stopped": "Stopped"}
 STATE_WORDS = {"running": "Building", "passed": "Passing", "failed": "Broken", "stopped": "Stopped"}
 
+# ---------------------------------------------------------------------------
+# The page's languages. Each visitor gets their browser's language, or the one
+# they pick with the links on the page. The page's words are written in English
+# in the code below, inside t(), which looks them up here. To add a language,
+# add it to LANGUAGES and give it a table in TRANSLATIONS.
+# ---------------------------------------------------------------------------
+LANGUAGES = {"en": "English", "ja": "日本語", "zh": "中文"}
+LANGUAGE_COOKIE = "build_machine_language"
+TRANSLATIONS = {
+    "ja": {
+        "Building": "ビルド中",
+        "Passed": "成功",
+        "Failed": "失敗",
+        "Stopped": "中断",
+        "Passing": "正常",
+        "Broken": "失敗",
+        "Starting": "準備中",
+        "No builds yet": "ビルドはまだありません",
+        "Problem": "問題発生",
+        "If P4 wants a password, restart the build machine and type it there.": "P4 のパスワードが必要な場合は、ビルドマシンを再起動して、そのウィンドウで入力してください。",
+        "Download the newest build": "最新ビルドをダウンロード",
+        "Download the release build": "リリースビルドをダウンロード",
+        "Unzip it, then run the game. Every build below that passed can be downloaded too.": "展開してからゲームを起動してください。下の表にある成功したビルドも、すべてダウンロードできます。",
+        "Queued:": "待機中:",
+        "Log": "ログ",
+        "Download": "ダウンロード",
+        "test": "テスト",
+        "release": "リリース",
+        "shelf {change}": "シェルブ {change}",
+        "change {change}": "チェンジリスト {change}",
+        "the newest change": "最新のチェンジリスト",
+        "release build of {what}": "リリースビルド: {what}",
+        "Build {number}": "ビルド {number}",
+        "Release build {number}": "リリースビルド {number}",
+        "by {user}": "ユーザー: {user}",
+        "s": "秒",
+        "Mon Tue Wed Thu Fri Sat Sun": "(月) (火) (水) (木) (金) (土) (日)",
+        "token": "トークン",
+        "To start builds, open the team link from whoever runs the build machine. ": "ビルドを開始するには、ビルドマシンの管理者からチームリンクをもらって開いてください。",
+        "Release builds start from scratch and make the version players get. They're slower.": "リリースビルドは、プレイヤーに配る版を一からビルドします。その分、時間がかかります。",
+        "{name} builds": "{name} のビルド",
+        "Build now": "今すぐビルド",
+        "Release build": "リリースビルド",
+        "Can't reach the build machine. Still trying…": "ビルドマシンに接続できません。再試行中…",
+        "Result": "結果",
+        "Kind": "種類",
+        "Change": "チェンジリスト",
+        "Who": "ユーザー",
+        "What": "説明",
+        "Why": "きっかけ",
+        "Started": "開始",
+        "Took": "所要時間",
+        "Files": "ファイル",
+        "new change": "新規サブミット",
+        "button": "ボタン",
+        "request": "リクエスト",
+        "{what} ({why})": "{what} ({why})",
+        ", ": "、",
+    },
+    "zh": {
+        "Building": "构建中",
+        "Passed": "通过",
+        "Failed": "失败",
+        "Stopped": "已中断",
+        "Passing": "正常",
+        "Broken": "异常",
+        "Starting": "准备中",
+        "No builds yet": "暂无构建",
+        "Problem": "出现问题",
+        "If P4 wants a password, restart the build machine and type it there.": "如果 P4 要求输入密码，请重启构建机程序，并在它的窗口里输入。",
+        "Download the newest build": "下载最新构建",
+        "Download the release build": "下载最新发布构建",
+        "Unzip it, then run the game. Every build below that passed can be downloaded too.": "解压后运行游戏。下方每一次通过的构建也都可以下载。",
+        "Queued:": "排队中：",
+        "Log": "日志",
+        "Download": "下载",
+        "test": "测试",
+        "release": "发布",
+        "shelf {change}": "搁置 {change}",
+        "change {change}": "变更 {change}",
+        "the newest change": "最新变更",
+        "release build of {what}": "发布构建：{what}",
+        "Build {number}": "构建 #{number}",
+        "Release build {number}": "发布构建 #{number}",
+        "by {user}": "用户 {user}",
+        "s": "秒",
+        "Mon Tue Wed Thu Fri Sat Sun": "周一 周二 周三 周四 周五 周六 周日",
+        "token": "令牌",
+        "To start builds, open the team link from whoever runs the build machine. ": "启动构建需要团队链接，请找运行构建机的人要。",
+        "Release builds start from scratch and make the version players get. They're slower.": "发布构建会从头构建，生成最终给玩家的版本，速度会慢一些。",
+        "{name} builds": "{name} 构建",
+        "Build now": "立即构建",
+        "Release build": "发布构建",
+        "Can't reach the build machine. Still trying…": "连接不上构建机，正在重试…",
+        "Result": "结果",
+        "Kind": "类型",
+        "Change": "变更",
+        "Who": "用户",
+        "What": "说明",
+        "Why": "触发方式",
+        "Started": "开始时间",
+        "Took": "耗时",
+        "Files": "文件",
+        "new change": "新变更",
+        "button": "手动",
+        "request": "请求",
+        "{what} ({why})": "{what}（{why}）",
+        ", ": "、",
+    },
+}
+page = threading.local()               # each request has a thread of its own: its language goes here
+
+
+def t(text, **values):
+    """Text in the language of the page being made, with any {values} filled in.
+    Anything with no translation stays as it is."""
+    words = TRANSLATIONS.get(getattr(page, "language", "en"), {}).get(text, text)
+    return words.format(**values) if values else words
+
 
 def chip(state, text=""):
     """A badge: green for passed, red for failed, amber with a dot for work happening now."""
     dot = '<span class="dot"></span>' if state in ("running", "queued") else ""
-    return f'<span class="chip {state}">{dot}{text or CHIP_WORDS.get(state, state)}</span>'
+    return f'<span class="chip {state}">{dot}{text or t(CHIP_WORDS.get(state, state))}</span>'
 
 
 def took(build):
     """How long a build took. One still running counts up in the browser every second;
     one the build machine was stopped in the middle of never got a time, so it shows nothing."""
     if build["result"] != "running":
-        return f'{build["seconds"]}s' if build["seconds"] is not None else ""
+        return f'{build["seconds"]}{t("s")}' if build["seconds"] is not None else ""
     seconds = round(time.time() - build["started"])
-    return f'<span class="tick" data-seconds="{seconds}">{seconds}s</span>'
+    return f'<span class="tick" data-seconds="{seconds}">{seconds}{t("s")}</span>'
 
 
 def megabytes(build):
@@ -858,34 +997,42 @@ def megabytes(build):
 
 
 def download_button(url, what, build, main=False):
-    details = ", ".join(filter(None, [f'change {html.escape(build["change"])}', megabytes(build)]))
+    change = t("change {change}", change=html.escape(build["change"]))
+    details = ", ".join(filter(None, [change, megabytes(build)]))
     return (f'<a class="btn{" go" if main else ""}" href="{url}">{what}</a>'
             f'<span class="dim">{details}</span>')
 
 
 def job_words(job):
     """What a waiting request will build, e.g. "release build of shelf 41 (Code Review)"."""
-    what = f'shelf {html.escape(job["shelf"])}' if job["shelf"] else "the newest change"
+    what = t("shelf {change}", change=html.escape(job["shelf"])) if job["shelf"] else t("the newest change")
     if job["kind"] == "release":
-        what = f"release build of {what}"
-    return f'{what} ({html.escape(job["reason"])})'
+        what = t("release build of {what}", what=what)
+    return t("{what} ({why})", what=what, why=reason_words(job["reason"]))
+
+
+def reason_words(reason):
+    """Why a build started, e.g. "new change, button". The build machine's own reasons are
+    translated; one a trigger or a teammate sent stays as it came."""
+    return html.escape(t(", ").join(t(part) for part in reason.split(", ")))
 
 
 def build_banner(build):
     """The panel at the top: the build running now, or how the last one went."""
     e = html.escape
-    kind = "Release build" if build.get("kind") == "release" else "Build"
-    what = "shelf" if build["shelved"] else "change"
-    details = [f'{kind} {build["number"]}', f'{what} {e(build["change"])}',
-               f'by {e(build["user"])}', took(build)]
+    kind = "Release build {number}" if build.get("kind") == "release" else "Build {number}"
+    what = "shelf {change}" if build["shelved"] else "change {change}"
+    details = [t(kind, number=build["number"]), t(what, change=e(build["change"])),
+               t("by {user}", user=e(build["user"])), took(build)]
     return (f'<div class="banner {build["result"]}">{chip(build["result"])}'
             f'<span class="dim">{" · ".join(filter(None, details))}</span>'
             f'<span class="spacer"></span>'
-            f'<a class="btn small" href="/builds/{build["number"]}/log.txt">Log</a>'
+            f'<a class="btn small" href="/builds/{build["number"]}/log.txt">{t("Log")}</a>'
             f'<p class="desc">{e(build["desc"])}</p></div>')
 
 
-def status_page(can_build):
+def status_page(can_build, language="en"):
+    page.language = language           # t() reads it, here and in the functions above
     e = html.escape                    # e() makes text safe to put inside HTML
     # The panel says what's happening now. When nothing is, it says how the newest submitted
     # change did, which is what "is the game working?" means.
@@ -894,67 +1041,77 @@ def status_page(can_build):
 
     if active:
         active = dict(active)          # a copy, so a build finishing mid-page can't leave the
-        label = STATE_WORDS.get(active["result"], "Stopped")   # tab title and the panel disagreeing
+        label = t(STATE_WORDS.get(active["result"], "Stopped"))  # tab title and the panel disagreeing
         banner = build_banner(active)
     elif pending:                      # off the queue, not yet far enough along to have a number
-        label = "Starting"
-        banner = (f'<div class="banner running">{chip("running", "Starting")}'
+        label = t("Starting")
+        banner = (f'<div class="banner running">{chip("running", label)}'
                   f'<span class="dim">{job_words(pending)}</span></div>')
     elif latest := newest_build():
-        label, banner = STATE_WORDS.get(latest["result"], "Stopped"), build_banner(latest)
+        label, banner = t(STATE_WORDS.get(latest["result"], "Stopped")), build_banner(latest)
     else:
-        label, banner = "No builds yet", '<div class="banner">No builds yet</div>'
+        label = t("No builds yet")
+        banner = f'<div class="banner">{label}</div>'
     if problem:
-        banner += ('<div class="banner failed"><span class="headline">Problem</span>'
-                   f'<span class="dim">{e(problem)}</span><p class="desc">If P4 wants a password, '
-                   'restart the build machine and type it there.</p></div>')
+        fix = t("If P4 wants a password, restart the build machine and type it there.")
+        banner += (f'<div class="banner failed"><span class="headline">{t("Problem")}</span>'
+                   f'<span class="dim">{e(problem)}</span><p class="desc">{fix}</p></div>')
 
     downloads = ""
     if good:
-        downloads = download_button("/latest", "Download the newest build", good, main=True)
+        downloads = download_button("/latest", t("Download the newest build"), good, main=True)
     if good_release and good_release is not good:
-        downloads += download_button("/latest-release", "Download the release build", good_release)
+        downloads += download_button("/latest-release", t("Download the release build"), good_release)
     if downloads:
-        downloads = (f'<div class="row">{downloads}</div><p class="note">Unzip it, then run the '
-                     'game. Every build below that passed can be downloaded too.</p>')
+        unzip = t("Unzip it, then run the game. Every build below that passed can be downloaded too.")
+        downloads = f'<div class="row">{downloads}</div><p class="note">{unzip}</p>'
 
     # Whatever is waiting its turn. The one being built is in the panel above, not here.
     waiting = [chip("queued", job_words(job)) for job in list(queue)]
-    queued = f'<div class="row dim queued">Queued: {"".join(waiting)}</div>' if waiting else ""
+    queued = f'<div class="row dim queued">{t("Queued:")} {"".join(waiting)}</div>' if waiting else ""
 
     rows = ""
+    days = t("Mon Tue Wed Thu Fri Sat Sun").split()
     for b in reversed(history[-KEEP_BUILDS:]):
-        files = f'<a href="/builds/{b["number"]}/log.txt">Log</a>'
+        files = f'<a href="/builds/{b["number"]}/log.txt">{t("Log")}</a>'
         if b["zip"]:                   # every build that passed can be downloaded, not just the newest
-            files = (f'<a class="btn small" href="{e(zip_link(b))}">Download</a> '
+            files = (f'<a class="btn small" href="{e(zip_link(b))}">{t("Download")}</a> '
                      f'<span class="dim">{megabytes(b)}</span> · {files}')
+        change = t("shelf {change}", change=e(b["change"])) if b["shelved"] else e(b["change"])
+        started = time.localtime(b["started"])
         rows += (f'<tr><td class="num dim">{b["number"]}</td><td>{chip(b["result"])}</td>'
-                 f'<td class="dim">{b.get("kind", "test")}</td>'
-                 f'<td class="num">{"shelf " if b["shelved"] else ""}{e(b["change"])}</td>'
+                 f'<td class="dim">{t(b.get("kind", "test"))}</td>'
+                 f'<td class="num">{change}</td>'
                  f'<td>{e(b["user"])}</td><td class="what">{e(b["desc"])}</td>'
-                 f'<td class="dim">{e(b["reason"])}</td>'
-                 f'<td class="dim">{time.strftime("%a %H:%M", time.localtime(b["started"]))}</td>'
+                 f'<td class="dim">{reason_words(b["reason"])}</td>'
+                 f'<td class="dim">{days[started.tm_wday]} {time.strftime("%H:%M", started)}</td>'
                  f'<td class="num">{took(b)}</td><td>{files}</td></tr>')
 
     # A browser that opened the team link has the token in a cookie. Anyone else types it.
-    token_box = "" if can_build else '<input name="token" type="password" placeholder="token">'
-    hint = "" if can_build else "To start builds, open the team link from whoever runs the build machine. "
+    token_box = "" if can_build else f'<input name="token" type="password" placeholder="{t("token")}">'
+    hint = "" if can_build else t("To start builds, open the team link from whoever runs the build machine. ")
+    slower = t("Release builds start from scratch and make the version players get. They're slower.")
+    title = t("{name} builds", name=e(NAME))
+    headers = "".join(f"<th>{t(word)}</th>" for word in ["Result", "Kind", "Change", "Who", "What",
+                                                         "Why", "Started", "Took", "Files"])
+    languages = " · ".join(name if code == language else f'<a href="/?lang={code}">{name}</a>'
+                           for code, name in LANGUAGES.items())
+    html_language = "zh-Hans" if language == "zh" else language   # Simplified Chinese, for its fonts
     return f"""<!doctype html>
-<html><head><meta charset="utf-8">
+<html lang="{html_language}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{label} · {e(NAME)} builds</title><style>{STYLE}</style></head><body>
-<h1>{e(NAME)} builds <small>{e(STREAM)}</small></h1>
+<title>{label} · {title}</title><style>{STYLE}</style></head><body>
+<header class="row"><h1>{title} <small>{e(STREAM)}</small></h1><span class="spacer"></span>
+<nav>{languages}</nav></header>
 <form class="row" method="post" action="/build">
 <input type="hidden" name="reason" value="button"><input type="hidden" name="force" value="1">
-{token_box}<button class="btn go">Build now</button>
-<button class="btn" name="kind" value="release">Release build</button></form>
-<p class="note">{hint}Release builds start from scratch and make the version players get.
-They're slower.</p>
-<p id="offline" class="banner failed" hidden><b>Can't reach the build machine. Still trying…</b></p>
+{token_box}<button class="btn go">{t("Build now")}</button>
+<button class="btn" name="kind" value="release">{t("Release build")}</button></form>
+<p class="note">{hint}{slower}</p>
+<p id="offline" class="banner failed" hidden><b>{t("Can't reach the build machine. Still trying…")}</b></p>
 <div id="live">{banner}{downloads}{queued}
 <div class="builds"><table>
-<thead><tr><th>#</th><th>Result</th><th>Kind</th><th>Change</th><th>Who</th><th>What</th>
-<th>Why</th><th>Started</th><th>Took</th><th>Files</th></tr></thead>
+<thead><tr><th>#</th>{headers}</tr></thead>
 <tbody>{rows}</tbody></table></div></div>
 <script>  // fetch this page again and swap in just the part that changes: the buttons stay put
 let swapped = Date.now();            // when that part last changed, for the counter below
@@ -962,7 +1119,7 @@ let swapped = Date.now();            // when that part last changed, for the cou
 function tick() {{                     // a running build's seconds, counted up between updates
   const since = Math.round((Date.now() - swapped) / 1000);
   for (const span of document.querySelectorAll(".tick"))
-    span.textContent = Number(span.dataset.seconds) + since + "s";
+    span.textContent = Number(span.dataset.seconds) + since + "{t("s")}";
 }}
 
 async function update() {{

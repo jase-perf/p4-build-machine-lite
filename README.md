@@ -1,5 +1,7 @@
 # P4 Build Machine Lite
 
+English · [日本語](README.ja.md) · [简体中文](README.zh-CN.md)
+
 Turns a spare computer into your team's build machine. When someone submits to P4, it builds the game and puts it on a web page your team can download from.
 
 For indie teams, solo devs and game jams that don't need Jenkins, TeamCity or Horde but want automated builds. It's one exe or python file.
@@ -29,6 +31,7 @@ If P4 needs you to trust the server or log in, the build machine asks in its win
 - **Build now** builds the newest change straight away.
 - **Release build** starts from scratch and makes the version players get. It's slower.
 - **Download** gets any build that passed. The link at the top (`/latest`) always gets the newest.
+- **English · 日本語 · 中文** at the top right changes the page's language. It starts in your browser's language. The build machine's own window, its settings file and its Discord posts are in English.
 
 Anyone who can reach the page can watch and download. Starting builds needs the team link, or the token it contains.
 
